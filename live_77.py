@@ -4,9 +4,11 @@
 Book: 3 MNQ SIM, stop 20, TP 40, BE at +20 (manage_be20).
 Session 04:00–16:00 CDT M–F. Holidays skipped.
 
-Arm: 1m traded the 6-pt shelf / cluster AND MNQ 5m volume not expanding.
+Location is NEVER mid.
+  Watch: fade if 1m HIGH within 10 of rail; bounce if 1m LOW within 10.
+  Arm:   fade if closed 1m HIGH tags 6-pt shelf; bounce if closed 1m LOW tags it.
 Trigger: NEXT closed 1m HL (bounce) or LH (fade), close still on our side.
-Tape lean at fire.
+Tape lean at fire. No tape → no fire.
 Arrival is STICKY for the visit (from above = bounce, from below = fade).
 Through then back = BRT reclaim → skip.
 Dead c2 → this visit is done until price leaves 10 pts.
@@ -41,8 +43,9 @@ QTY = 3
 PACE_AFTER = 180.0
 TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
-SKIP_LIVE = ("ONH",)  # walking overnight high is not a rail
+SKIP_LIVE = ("ONH",)
 BOOK = dict(qty=QTY, stop=STOP_PTS, tp=TP_PTS, be=BE_PTS, peel=False, runner=False)
+NOTE = "fade_bounce_20_40_be20_hl"
 
 
 def envload():
@@ -102,6 +105,37 @@ def bar_open(ts: float, minutes: int) -> float:
     return dt.replace(minute=m, second=0, microsecond=0).timestamp()
 
 
+def extreme_dist(px: float, lo: float, hi: float) -> float:
+    """0 if bar traded the rail. Rail above → fade uses HIGH. Rail below → bounce uses LOW."""
+    if lo <= px <= hi:
+        return 0.0
+    if px > hi:
+        return px - hi
+    return lo - px
+
+
+def candle_hl(*candles, mid: float):
+    lo = hi = None
+    for c in candles:
+        if c is None:
+            continue
+        h = getattr(c, "h", None)
+        l = getattr(c, "l", None)
+        if h is None:
+            h = getattr(c, "high", None)
+        if l is None:
+            l = getattr(c, "low", None)
+        if h is not None:
+            hi = float(h) if hi is None else max(hi, float(h))
+        if l is not None:
+            lo = float(l) if lo is None else min(lo, float(l))
+    if lo is None:
+        lo = mid
+    if hi is None:
+        hi = mid
+    return lo, hi
+
+
 @dataclass
 class Rail:
     name: str
@@ -132,8 +166,10 @@ class Pack:
     def zone_hi(self):
         return max(self.hi, self.chosen.px + ARM_PTS)
 
-    def hit(self, lo, hi) -> bool:
-        return hi >= self.zone_lo and lo <= self.zone_hi
+    def hit(self, lo, hi, bounce: bool) -> bool:
+        if bounce:
+            return self.zone_lo <= lo <= self.zone_hi
+        return self.zone_lo <= hi <= self.zone_hi
 
     def close_through(self, close: float, bounce: bool) -> bool:
         if bounce:
@@ -241,19 +277,19 @@ def is_h4(r: Rail) -> bool:
     return "H4" in u or r.kind == "240"
 
 
-def nearest_pack(mid: float, rails: list[Rail]) -> Pack | None:
-    live = [r for r in rails if abs(mid - r.px) <= WATCH]
+def nearest_pack(mid: float, rails: list[Rail], lo: float, hi: float) -> Pack | None:
+    live = [r for r in rails if extreme_dist(r.px, lo, hi) <= WATCH]
     if not live:
         return None
-    live.sort(key=lambda r: abs(mid - r.px))
+    live.sort(key=lambda r: (extreme_dist(r.px, lo, hi), abs(mid - r.px)))
     seed = live[0]
     pack = [r for r in live if abs(r.px - seed.px) <= CLUSTER]
-    lo = min(r.px for r in pack)
-    hi = max(r.px for r in pack)
+    plo = min(r.px for r in pack)
+    phi = max(r.px for r in pack)
     h4 = [r for r in pack if is_h4(r)]
     pool = h4 or pack
-    pool.sort(key=lambda r: (abs(mid - r.px), -r.ts))
-    return Pack(pool[0], lo, hi)
+    pool.sort(key=lambda r: (extreme_dist(r.px, lo, hi), abs(mid - r.px), -r.ts))
+    return Pack(pool[0], plo, phi)
 
 
 @dataclass
@@ -350,7 +386,7 @@ def follow(path: Path):
             if not ln:
                 if time.time() - last_hb > 60:
                     ok, why = session()
-                    emit(event="heartbeat", session=ok, why=why, fire=FIRE, locked=locked(), book=BOOK)
+                    emit(event="heartbeat", session=ok, why=why, fire=FIRE, locked=locked(), book=BOOK, note=NOTE)
                     last_hb = time.time()
                 time.sleep(0.15)
                 continue
@@ -365,7 +401,7 @@ def main():
     except Exception as e:
         dbvol = None
         emit(event="vol_err", err=str(e)[:200])
-    emit(event="seven_start", fire=FIRE, book=BOOK, note="fade_bounce_20_40_be20",
+    emit(event="seven_start", fire=FIRE, book=BOOK, note=NOTE,
          vol_src="databento_trades" if dbvol else "missing")
     bars = MinuteBars()
     machines: dict[str, Machine] = {}
@@ -398,10 +434,9 @@ def main():
             rails = load_pois()
             last_poi = time.time()
 
-        pack = nearest_pack(mid, rails)
-
         if dbvol is not None:
             closed = dbvol.last_closed_1()
+            forming = getattr(dbvol, "m1", None) or getattr(dbvol, "cur_1", None) or bars.m1
             vol_ok, vmet = dbvol.vol_not_expanding(now, PACE_AFTER)
             vol_src = "databento_trades"
             vmet = dict(vmet or {})
@@ -414,17 +449,20 @@ def main():
                 vmet["why"] = "databento_stale"
         else:
             closed = bars.last_closed_1()
+            forming = bars.m1
             vol_ok, vmet = False, dict(why="databento_missing")
             vol_src = "missing"
+
+        bar_lo, bar_hi = candle_hl(closed, forming, mid=mid)
+        pack = nearest_pack(mid, rails, bar_lo, bar_hi)
 
         new_1m = closed is not None and closed.t0 != last_1m_t0
         if new_1m:
             last_1m_t0 = closed.t0
 
-        # left 10 pts of a bucket → that visit can arm again later
         for k, mm in list(machines.items()):
             try:
-                far = abs(mid - float(k)) > WATCH
+                far = extreme_dist(float(k), bar_lo, bar_hi) > WATCH
             except Exception:
                 far = pack is None
             if far and not mm.spent_fill:
@@ -435,7 +473,8 @@ def main():
 
         if pack is None:
             if n % 40 == 0:
-                emit(event="score", mid=round(mid, 3), reason="no_rail_in_watch", vol=vmet, vol_src=vol_src)
+                emit(event="score", mid=round(mid, 3), reason="no_rail_in_watch",
+                     vol=vmet, vol_src=vol_src, bar=[bar_lo, bar_hi])
             continue
 
         vk = visit_key(pack)
@@ -443,13 +482,16 @@ def main():
         if m is None:
             m = Machine(vk)
             machines[vk] = m
-        # first cross this visit sticks
         if m.arrived is None and m.last_mid is not None:
             if m.last_mid > pack.chosen.px and mid <= pack.chosen.px:
                 m.arrived = "down"
             elif m.last_mid < pack.chosen.px and mid >= pack.chosen.px:
                 m.arrived = "up"
         m.last_mid = mid
+
+        bounce = (m.arrived or "down") == "down"
+        if m.arrived is None:
+            bounce = bar_lo <= pack.chosen.px  # low already tagged → bounce; else fade
 
         if m.spent_fill:
             if n % 20 == 0:
@@ -458,7 +500,8 @@ def main():
 
         rec = dict(event="score", mid=round(mid, 3), poi=pack.key, vk=vk, px=pack.chosen.px,
                    zone=[pack.zone_lo, pack.zone_hi], vol=vmet, vol_src=vol_src,
-                   phase=m.phase, submit=False, arrived=m.arrived, visit_dead=m.visit_dead)
+                   phase=m.phase, submit=False, arrived=m.arrived, visit_dead=m.visit_dead,
+                   bar=[round(bar_lo, 3), round(bar_hi, 3)], tag="low" if bounce else "high")
 
         if m.visit_dead:
             rec["reason"] = "visit_spent"
@@ -472,8 +515,9 @@ def main():
                 if n % 15 == 0:
                     emit(**rec)
                 continue
-            if not pack.hit(closed.l, closed.h):
+            if not pack.hit(closed.l, closed.h, bounce):
                 rec["reason"] = "idle_no_hit"
+                rec["c1"] = dict(h=closed.h, l=closed.l, c=closed.c)
                 if n % 15 == 0:
                     emit(**rec)
                 continue
@@ -487,9 +531,6 @@ def main():
                 rec["snap"] = m.out("brt_reclaim")
                 emit(**rec)
                 continue
-            bounce = (m.arrived or "down") == "down"
-            if m.arrived is None:
-                bounce = mid >= pack.chosen.px
             m.bounce = bounce
             m.picture = "bounce_long" if bounce else "fade_short"
             m.side = "Buy" if bounce else "Sell"
