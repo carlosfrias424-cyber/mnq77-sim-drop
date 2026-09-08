@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
 """7/7 fade/bounce ONLY. Dual off. No BRT.
 
-Book: 3 MNQ SIM, stop 20, TP 40, BE at +20 (manage_be20).
-Session 04:00–16:00 CDT M–F. Holidays skipped.
+Book: 3 MNQ SIM. Stop = 2 pts beyond rail. TP = 40 if R<=20 else 2R. BE +20.
+Session 02:00–16:00 America/Chicago (London cash) M–F. Holidays skipped.
 
 Location is NEVER mid.
-  Watch: fade if 1m HIGH within 10 of rail; bounce if 1m LOW within 10.
-  Arm:   fade if closed 1m HIGH tags 6-pt shelf; bounce if closed 1m LOW tags it.
-Trigger: NEXT closed 1m HL (bounce) or LH (fade), close still on our side.
-Tape lean at fire. No tape → no fire.
-Arrival is STICKY for the visit (from above = bounce, from below = fade).
-Through then back = BRT reclaim → skip.
-Dead c2 → this visit is done until price leaves 10 pts.
-Walking ONH is not a rail.
+  Watch: fade if 1m HIGH tags a rail; bounce if 1m LOW tags a rail.
+  Spike high → pick the rail at the HIGH (not nearest mid).
+Arm: closed 1m high (fade) / low (bounce) tags 6-pt shelf.
+Trigger: next closed 1m HL / LH, close still on our side, tape lean.
+Lock: only while Tradovate net != 0. Flat → fire other rails.
+Same sweep: no revenge until price leaves 10 pts.
 """
 from __future__ import annotations
 
 import json, os, time, subprocess, sys
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, date
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -26,6 +24,7 @@ from zoneinfo import ZoneInfo
 ROOT = Path("/home/administrator/.openclaw/workspace/mnq_hybrid")
 POI, DEC, OUT = ROOT / "logs/tv_poi.jsonl", ROOT / "logs/decision.jsonl", ROOT / "logs/seven.jsonl"
 LOCK = ROOT / "logs/submit.lock"
+BE20 = ROOT / "logs/be20.jsonl"
 PY = ROOT / ".venv/bin/python"
 SUBMIT = ROOT / "apps/tradovate/place_struct40.py"
 sys.path.insert(0, str(ROOT / "apps" / "watcher7"))
@@ -36,16 +35,18 @@ WATCH = 10.0
 ARM_PTS = 6.0
 FAIL_PTS = 6.0
 CLUSTER = 8.0
-STOP_PTS = 20.0
-TP_PTS = 40.0
+AIR = 2.0
+TP_DEFAULT = 40.0
 BE_PTS = 20.0
+R_SPLIT = 20.0
 QTY = 3
 PACE_AFTER = 180.0
+SESSION_START = 2 * 60
+SESSION_END = 16 * 60
 TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
 SKIP_LIVE = ("ONH",)
-BOOK = dict(qty=QTY, stop=STOP_PTS, tp=TP_PTS, be=BE_PTS, peel=False, runner=False)
-NOTE = "fade_bounce_20_40_be20_hl"
+NOTE = "london2_railstop_hl"
 
 
 def envload():
@@ -68,14 +69,52 @@ def session():
     if dt.date() in HOLIDAYS:
         return False, "holiday"
     mins = dt.hour * 60 + dt.minute
-    if mins < 4 * 60:
-        return False, "before_4am"
-    if mins >= 16 * 60:
+    if mins < SESSION_START:
+        return False, "before_2am"
+    if mins >= SESSION_END:
         return False, "after_close"
     return True, "open"
 
 
+def last_net():
+    if not BE20.exists():
+        return None
+    try:
+        with BE20.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            n = f.tell()
+            f.seek(max(0, n - 32768), os.SEEK_SET)
+            chunk = f.read().decode("utf-8", "replace")
+    except Exception:
+        return None
+    net = None
+    for ln in chunk.splitlines():
+        if not ln.strip():
+            continue
+        try:
+            o = json.loads(ln)
+        except Exception:
+            continue
+        if o.get("event") in ("flat", "tick", "be_move"):
+            if "net" in o and o.get("net") is not None:
+                try:
+                    net = int(o["net"])
+                except Exception:
+                    pass
+    return net
+
+
 def locked():
+    net = last_net()
+    if net == 0:
+        if LOCK.exists():
+            try:
+                LOCK.unlink()
+            except Exception:
+                pass
+        return False
+    if net not in (0, None) and abs(int(net)) > 0:
+        return True
     if not LOCK.exists():
         return False
     try:
@@ -106,7 +145,6 @@ def bar_open(ts: float, minutes: int) -> float:
 
 
 def extreme_dist(px: float, lo: float, hi: float) -> float:
-    """0 if bar traded the rail. Rail above → fade uses HIGH. Rail below → bounce uses LOW."""
     if lo <= px <= hi:
         return 0.0
     if px > hi:
@@ -119,12 +157,8 @@ def candle_hl(*candles, mid: float):
     for c in candles:
         if c is None:
             continue
-        h = getattr(c, "h", None)
-        l = getattr(c, "l", None)
-        if h is None:
-            h = getattr(c, "high", None)
-        if l is None:
-            l = getattr(c, "low", None)
+        h = getattr(c, "h", None) or getattr(c, "high", None)
+        l = getattr(c, "l", None) or getattr(c, "low", None)
         if h is not None:
             hi = float(h) if hi is None else max(hi, float(h))
         if l is not None:
@@ -134,6 +168,24 @@ def candle_hl(*candles, mid: float):
     if hi is None:
         hi = mid
     return lo, hi
+
+
+def rail_stop_tp(bounce: bool, pack: "Pack", mid: float):
+    if bounce:
+        stop_px = qtr(pack.zone_lo - AIR)
+        r = max(TICK, mid - stop_px)
+    else:
+        stop_px = qtr(pack.zone_hi + AIR)
+        r = max(TICK, stop_px - mid)
+    r = qtr(r)
+    tp = TP_DEFAULT if r <= R_SPLIT else qtr(2.0 * r)
+    return stop_px, r, tp
+
+
+def book_now(r=None, tp=None):
+    return dict(qty=QTY, stop="rail+2", max_r=None, tp="40_or_2R",
+                be=BE_PTS, peel=False, runner=False,
+                last_r=r, last_tp=tp)
 
 
 @dataclass
@@ -176,17 +228,15 @@ class Pack:
             return close < self.zone_lo - FAIL_PTS
         return close > self.zone_hi + FAIL_PTS
 
-    def dist(self, mid: float) -> float:
-        if mid < self.zone_lo:
-            return self.zone_lo - mid
-        if mid > self.zone_hi:
-            return mid - self.zone_hi
-        return 0.0
-
 
 def visit_key(pack: Pack) -> str:
     midp = 0.5 * (pack.lo + pack.hi)
     b = round(midp / CLUSTER) * CLUSTER
+    return f"{b:.2f}"
+
+
+def vk_px(px: float) -> str:
+    b = round(float(px) / CLUSTER) * CLUSTER
     return f"{b:.2f}"
 
 
@@ -277,19 +327,34 @@ def is_h4(r: Rail) -> bool:
     return "H4" in u or r.kind == "240"
 
 
-def nearest_pack(mid: float, rails: list[Rail], lo: float, hi: float) -> Pack | None:
-    live = [r for r in rails if extreme_dist(r.px, lo, hi) <= WATCH]
-    if not live:
+def nearest_pack(mid: float, rails: list[Rail], lo: float, hi: float, skip_keys=()) -> Pack | None:
+    fade_c = [r for r in rails if abs(hi - r.px) <= WATCH or (lo <= r.px <= hi and r.px >= mid)]
+    bounce_c = [r for r in rails if abs(lo - r.px) <= WATCH or (lo <= r.px <= hi and r.px <= mid)]
+    if fade_c and bounce_c:
+        use_fade = (hi - mid) >= (mid - lo)
+        pool = fade_c if use_fade else bounce_c
+    elif fade_c:
+        use_fade = True
+        pool = fade_c
+    elif bounce_c:
+        use_fade = False
+        pool = bounce_c
+    else:
+        pool = [r for r in rails if extreme_dist(r.px, lo, hi) <= WATCH]
+        use_fade = (hi - mid) >= (mid - lo)
+    if skip_keys:
+        pool = [r for r in pool if vk_px(r.px) not in skip_keys]
+    if not pool:
         return None
-    live.sort(key=lambda r: (extreme_dist(r.px, lo, hi), abs(mid - r.px)))
-    seed = live[0]
-    pack = [r for r in live if abs(r.px - seed.px) <= CLUSTER]
+    anchor = hi if use_fade else lo
+    pool.sort(key=lambda r: (abs(r.px - anchor), 0 if is_h4(r) else 1, -r.ts))
+    seed = pool[0]
+    pack = [r for r in rails if abs(r.px - seed.px) <= CLUSTER]
     plo = min(r.px for r in pack)
     phi = max(r.px for r in pack)
     h4 = [r for r in pack if is_h4(r)]
-    pool = h4 or pack
-    pool.sort(key=lambda r: (extreme_dist(r.px, lo, hi), abs(mid - r.px), -r.ts))
-    return Pack(pool[0], plo, phi)
+    chosen = min(h4 or pack, key=lambda r: (abs(r.px - anchor), -r.ts))
+    return Pack(chosen, plo, phi)
 
 
 @dataclass
@@ -315,6 +380,7 @@ class Machine:
         self.reset_attempt()
         self.visit_dead = False
         self.arrived = None
+        self.spent_fill = False
 
     def out(self, reason, go=False):
         return dict(
@@ -333,7 +399,6 @@ def tape_lean(row: dict, bounce: bool) -> bool:
 
 
 def is_brt_reclaim(pack: Pack, c: Candle) -> bool:
-    """Poke through the shelf then close back = reclaim / BRT. Skip."""
     poked_dn = c.l < pack.zone_lo - FAIL_PTS
     poked_up = c.h > pack.zone_hi + FAIL_PTS
     back_up = c.c >= pack.zone_lo
@@ -341,22 +406,22 @@ def is_brt_reclaim(pack: Pack, c: Candle) -> bool:
     return (poked_dn and back_up) or (poked_up and back_dn)
 
 
-def send_book(side: str, name: str, px: float, mid: float, stop_px: float, stop_pts: float):
+def send_book(side: str, name: str, px: float, mid: float, stop_px: float, stop_pts: float, tp_pts: float):
     env = os.environ.copy()
     env.update({
         "MNQ_SIDE": side, "MNQ_QTY": str(QTY), "TRADOVATE_ENV": "demo",
         "MNQ_POI_NAME": str(name), "MNQ_POI_PX": str(px),
         "MNQ_MID": str(mid), "MNQ_ENTRY": str(round(mid, 2)),
-        "MNQ_STOP_PX": str(qtr(stop_px)), "MNQ_STOP_PTS": str(STOP_PTS),
-        "MNQ_T40": str(TP_PTS),
+        "MNQ_STOP_PX": str(qtr(stop_px)), "MNQ_STOP_PTS": str(stop_pts),
+        "MNQ_T40": str(tp_pts),
     })
     r = subprocess.run([str(PY), str(SUBMIT)], cwd=str(ROOT), env=env,
                        capture_output=True, text=True, timeout=60)
     if r.returncode == 0:
         LOCK.write_text(json.dumps({
             "side": side, "poi": name, "px": px, "qty": QTY,
-            "entry": round(mid, 2), "stop_px": stop_px, "stop_pts": STOP_PTS,
-            "tp": TP_PTS, "be": BE_PTS, "ts": time.time(),
+            "entry": round(mid, 2), "stop_px": stop_px, "stop_pts": stop_pts,
+            "tp": tp_pts, "be": BE_PTS, "ts": time.time(),
         }))
     return r.returncode, (r.stdout or "")[-400:]
 
@@ -386,7 +451,8 @@ def follow(path: Path):
             if not ln:
                 if time.time() - last_hb > 60:
                     ok, why = session()
-                    emit(event="heartbeat", session=ok, why=why, fire=FIRE, locked=locked(), book=BOOK, note=NOTE)
+                    emit(event="heartbeat", session=ok, why=why, fire=FIRE,
+                         locked=locked(), book=book_now(), note=NOTE)
                     last_hb = time.time()
                 time.sleep(0.15)
                 continue
@@ -401,8 +467,8 @@ def main():
     except Exception as e:
         dbvol = None
         emit(event="vol_err", err=str(e)[:200])
-    emit(event="seven_start", fire=FIRE, book=BOOK, note=NOTE,
-         vol_src="databento_trades" if dbvol else "missing")
+    emit(event="seven_start", fire=FIRE, book=book_now(), note=NOTE,
+         session_start="02:00", vol_src="databento_trades" if dbvol else "missing")
     bars = MinuteBars()
     machines: dict[str, Machine] = {}
     rails: list[Rail] = []
@@ -454,7 +520,9 @@ def main():
             vol_src = "missing"
 
         bar_lo, bar_hi = candle_hl(closed, forming, mid=mid)
-        pack = nearest_pack(mid, rails, bar_lo, bar_hi)
+        in_pos = locked()
+        skip = {k for k, mm in machines.items() if mm.spent_fill} if not in_pos else set()
+        pack = nearest_pack(mid, rails, bar_lo, bar_hi, skip)
 
         new_1m = closed is not None and closed.t0 != last_1m_t0
         if new_1m:
@@ -465,8 +533,8 @@ def main():
                 far = extreme_dist(float(k), bar_lo, bar_hi) > WATCH
             except Exception:
                 far = pack is None
-            if far and not mm.spent_fill:
-                if mm.visit_dead or mm.phase != "IDLE":
+            if far:
+                if mm.visit_dead or mm.phase != "IDLE" or mm.spent_fill:
                     mm.clear_visit()
                     if n % 20 == 0:
                         emit(event="score", mid=round(mid, 3), poi=k, reason="left_watch_reset")
@@ -491,11 +559,12 @@ def main():
 
         bounce = (m.arrived or "down") == "down"
         if m.arrived is None:
-            bounce = bar_lo <= pack.chosen.px  # low already tagged → bounce; else fade
+            bounce = bar_lo <= pack.chosen.px
 
         if m.spent_fill:
+            rec_l = dict(event="score", mid=round(mid, 3), poi=pack.key, reason="same_sweep_spent")
             if n % 20 == 0:
-                emit(event="score", mid=round(mid, 3), poi=pack.key, reason="filled_lock")
+                emit(**rec_l)
             continue
 
         rec = dict(event="score", mid=round(mid, 3), poi=pack.key, vk=vk, px=pack.chosen.px,
@@ -554,12 +623,12 @@ def main():
             recut = (c2.l <= c1.l) if bounce else (c2.h >= c1.h)
             through = pack.close_through(c2.c, bounce)
             lean = tape_lean(o, bounce)
-            stop_px = qtr(mid - STOP_PTS) if bounce else qtr(mid + STOP_PTS)
+            stop_px, stop_pts, tp_pts = rail_stop_tp(bounce, pack, mid)
             rec.update(
                 c1=dict(h=c1.h, l=c1.l, c=c1.c),
                 c2=dict(h=c2.h, l=c2.l, c=c2.c),
                 hold=hold, hl_lh=hl, recut=recut, through=through, tape_lean=lean,
-                stop_pts=STOP_PTS, stop_px=stop_px, vol_ok=vol_ok,
+                stop_pts=stop_pts, stop_px=stop_px, tp_pts=tp_pts, vol_ok=vol_ok,
             )
             why = None
             if is_brt_reclaim(pack, c2):
@@ -585,16 +654,16 @@ def main():
 
             ok, sess = session()
             rec["event"] = "paper_fire"
-            rec["book"] = BOOK
+            rec["book"] = book_now(stop_pts, tp_pts)
             rec["snap"] = m.out("fire", True)
             if not FIRE:
                 rec["skip"] = "fire_off"
             elif not ok:
                 rec["skip"] = sess
-            elif locked():
+            elif in_pos:
                 rec["skip"] = "open_position"
             else:
-                rc, out = send_book(m.side, pack.key, pack.chosen.px, mid, stop_px, STOP_PTS)
+                rc, out = send_book(m.side, pack.key, pack.chosen.px, mid, stop_px, stop_pts, tp_pts)
                 rec["submit"] = rc == 0
                 rec["event"] = "struct40_submit" if rc == 0 else "struct40_fail"
                 rec["rc"] = rc
