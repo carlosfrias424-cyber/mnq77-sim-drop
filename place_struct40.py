@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DEMO fade book: 3 MNQ, stop 20 ALL lots, +40 TP ALL lots. No 300, no peel, no trail.
+"""DEMO fade book: 3 MNQ. Stop/TP from env (rail+2, 40 or 2R). No 300, no peel, no trail.
 
 BE is handled by manage_be20.py after fill (+20 → stop to entry).
 Demo URL only.
@@ -57,10 +57,22 @@ def main() -> int:
         log(event="blocked", reason="MNQ_SIDE must be Buy or Sell", side=side)
         return 3
 
-    stop_pts = STOP_PTS
+    try:
+        stop_pts = float(os.environ.get("MNQ_STOP_PTS") or STOP_PTS)
+    except ValueError:
+        stop_pts = STOP_PTS
+    try:
+        tp_pts = float(os.environ.get("MNQ_T40") or TP_PTS)
+    except ValueError:
+        tp_pts = TP_PTS
+    if stop_pts < 0.25:
+        stop_pts = STOP_PTS
+    if tp_pts < 0.25:
+        tp_pts = TP_PTS
+
     sign = 1.0 if side == "Buy" else -1.0
     sl = -sign * stop_pts
-    tp = sign * TP_PTS
+    tp = sign * tp_pts
     brackets = [
         {"qty": 1, "profitTarget": tp, "stopLoss": sl, "trailingStop": False}
         for _ in range(QTY)
@@ -160,7 +172,7 @@ def main() -> int:
         symbol=symbol,
         qty=QTY,
         stop_pts=stop_pts,
-        tp_pts=TP_PTS,
+        tp_pts=tp_pts,
         be_pts=20.0,
         brackets=brackets,
         result=result,
