@@ -47,7 +47,7 @@ TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
 ON_FREEZE = 8 * 60 + 30  # 08:30 CT — ONH/ONL freeze; walking before, rails after
 SKIP_LIVE = ()
-NOTE = "side_onfreeze_rth"
+NOTE = "skip_dead_visit_rth"
 
 
 def envload():
@@ -544,7 +544,7 @@ def main():
 
         bar_lo, bar_hi = candle_hl(closed, forming, mid=mid)
         in_pos = locked()
-        skip = {k for k, mm in machines.items() if mm.spent_fill} if not in_pos else set()
+        skip = {k for k, mm in machines.items() if mm.spent_fill or mm.visit_dead} if not in_pos else set()
         pack = nearest_pack(mid, rails, bar_lo, bar_hi, skip)
 
         new_1m = closed is not None and closed.t0 != last_1m_t0
