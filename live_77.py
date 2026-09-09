@@ -12,7 +12,8 @@ Trigger: next closed 1m HL / LH, close still on our side, CVD agree.
 Volume is logged, never a veto.
 Lock: only while Tradovate net != 0. Flat → fire other rails.
 Same sweep: no revenge until price leaves 10 pts.
-Live rails: H4 and H1 only. PDL/PDH/OPEN/EMA/ON do not fire.
+Rails: only webhooks received in the last FRESH_S seconds. No history book.
+PDL/PDH/OPEN are valid if they are alerting now. Stale JSONL rows cannot arm.
 """
 from __future__ import annotations
 
@@ -48,8 +49,9 @@ SESSION_END = 16 * 60
 TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
 ON_FREEZE = 8 * 60 + 30  # 08:30 CT — ONH/ONL freeze; walking before, rails after
-SKIP_LIVE = ("PDL", "PDH", "PWL", "PWH", "OPEN", "EMA", "ONH", "ONL")
-NOTE = "h4_h1_only"
+FRESH_S = 120.0          # only score a rail if TV alerted it in the last 2 minutes
+SKIP_LIVE = ()
+NOTE = "fresh_alert_only"
 
 
 def envload():
@@ -309,6 +311,7 @@ class MinuteBars:
 def load_pois():
     if not POI.exists():
         return []
+    now = time.time()
     best = {}
     for ln in POI.read_text().splitlines():
         if not ln.strip():
@@ -326,26 +329,31 @@ def load_pois():
         kind = str(o.get("type") or o.get("tf") or o.get("poi_name") or "H1")
         name = str(o.get("poi_name") or kind)
         tag = (name or kind).upper()
-        t = o.get("ts") or o.get("time") or o.get("t") or o.get("recv_ts") or 0
+        recv = o.get("recv_ts") or o.get("ts") or o.get("time") or o.get("t") or 0
+        t = o.get("ts") or o.get("time") or o.get("t") or recv or 0
+        try:
+            recv = float(recv)
+            if recv > 1e12:
+                recv /= 1000.0
+        except Exception:
+            recv = 0.0
         try:
             t = float(t)
             if t > 1e12:
                 t /= 1000.0
         except Exception:
             t = 0.0
-        if any(tag.startswith(x) or tag == x for x in SKIP_LIVE):
+        if recv <= 0 or (now - recv) > FRESH_S:
             continue
         if on_walking(tag, t):
             continue
         r = Rail(name, px, kind, t)
-        u = (r.kind + " " + r.name).upper()
-        if not ("H4" in u or r.kind in ("240", "4H") or "H1" in u or r.kind in ("60", "1H")):
-            continue
         if any(tag.startswith(x) or tag == x for x in ("EMA", "ONH", "ONL", "OPEN", "PDH", "PDL", "PWH", "PWL")):
             k = tag
         else:
             k = (r.kind, r.px)
-        if k not in best or r.ts >= best[k].ts:
+        if k not in best or recv >= getattr(best[k], "_recv", 0):
+            r._recv = recv
             best[k] = r
     return list(best.values())
 
