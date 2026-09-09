@@ -47,7 +47,7 @@ TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
 ON_FREEZE = 8 * 60 + 30  # 08:30 CT — ONH/ONL freeze; walking before, rails after
 SKIP_LIVE = ()
-NOTE = "london2_railstop_hl_onfreeze"
+NOTE = "london2_side_onfreeze"
 
 
 def envload():
@@ -623,6 +623,16 @@ def main():
                 rec["snap"] = m.out("brt_reclaim")
                 emit(**rec)
                 continue
+            if bounce and closed.c < pack.chosen.px:
+                rec["reason"] = "idle_long_under_rail"
+                rec["c1"] = dict(h=closed.h, l=closed.l, c=closed.c)
+                emit(**rec)
+                continue
+            if (not bounce) and closed.c > pack.chosen.px:
+                rec["reason"] = "idle_short_over_rail"
+                rec["c1"] = dict(h=closed.h, l=closed.l, c=closed.c)
+                emit(**rec)
+                continue
             m.bounce = bounce
             m.picture = "bounce_long" if bounce else "fade_short"
             m.side = "Buy" if bounce else "Sell"
@@ -641,7 +651,7 @@ def main():
                 continue
             c1, c2 = m.c1, closed
             bounce = m.bounce
-            hold = (c2.c >= pack.zone_lo) if bounce else (c2.c <= pack.zone_hi)
+            hold = (c2.c >= pack.chosen.px) if bounce else (c2.c <= pack.chosen.px)
             hl = c2.l > c1.l if bounce else c2.h < c1.h
             recut = (c2.l <= c1.l) if bounce else (c2.h >= c1.h)
             through = pack.close_through(c2.c, bounce)
