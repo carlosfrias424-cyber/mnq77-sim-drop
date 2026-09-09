@@ -8,7 +8,8 @@ Location is NEVER mid.
   Watch: fade if 1m HIGH tags a rail; bounce if 1m LOW tags a rail.
   Spike high → pick the rail at the HIGH (not nearest mid).
 Arm: closed 1m high (fade) / low (bounce) tags 6-pt shelf.
-Trigger: next closed 1m HL / LH, close still on our side, tape lean.
+Trigger: next closed 1m HL / LH, close still on our side, CVD agree.
+Volume is logged, never a veto.
 Lock: only while Tradovate net != 0. Flat → fire other rails.
 Same sweep: no revenge until price leaves 10 pts.
 """
@@ -47,7 +48,7 @@ TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
 ON_FREEZE = 8 * 60 + 30  # 08:30 CT — ONH/ONL freeze; walking before, rails after
 SKIP_LIVE = ()
-NOTE = "all_rails_in_watch"
+NOTE = "cvd_agree_vol_log"
 
 
 def envload():
@@ -577,7 +578,8 @@ def main():
 
             bounce = (m.arrived or "down") == "down"
             if m.arrived is None:
-                bounce = bar_lo <= pack.chosen.px
+                # closer wick: low near rail = bounce, high near rail = fade
+                bounce = abs(bar_lo - pack.chosen.px) <= abs(bar_hi - pack.chosen.px)
 
             if m.spent_fill:
                 if n % 20 == 0:
@@ -606,10 +608,9 @@ def main():
                     if n % 15 == 0:
                         emit(**rec)
                     continue
-                if not vol_ok:
-                    rec["reason"] = "idle_vol_expanding"
-                    emit(**rec)
-                    continue
+                lean0 = tape_lean(o, bounce)
+                rec["tape_lean"] = lean0
+                rec["vol_ok"] = vol_ok
                 if is_brt_reclaim(pack, closed):
                     m.visit_dead = True
                     rec["reason"] = "brt_reclaim"
@@ -624,6 +625,10 @@ def main():
                 if (not bounce) and closed.c > pack.chosen.px:
                     rec["reason"] = "idle_short_over_rail"
                     rec["c1"] = dict(h=closed.h, l=closed.l, c=closed.c)
+                    emit(**rec)
+                    continue
+                if not lean0:
+                    rec["reason"] = "idle_tape_against"
                     emit(**rec)
                     continue
                 m.bounce = bounce
@@ -661,8 +666,6 @@ def main():
                     why = "brt_reclaim"
                 elif through:
                     why = "c2_close_through"
-                elif not vol_ok:
-                    why = "vol_expanding"
                 elif recut:
                     why = "c2_recut"
                 elif not hl:
