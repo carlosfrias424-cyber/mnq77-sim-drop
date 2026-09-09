@@ -12,6 +12,7 @@ Trigger: next closed 1m HL / LH, close still on our side, CVD agree.
 Volume is logged, never a veto.
 Lock: only while Tradovate net != 0. Flat → fire other rails.
 Same sweep: no revenge until price leaves 10 pts.
+Live rails: H4 and H1 only. PDL/PDH/OPEN/EMA/ON do not fire.
 """
 from __future__ import annotations
 
@@ -47,8 +48,8 @@ SESSION_END = 16 * 60
 TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
 ON_FREEZE = 8 * 60 + 30  # 08:30 CT — ONH/ONL freeze; walking before, rails after
-SKIP_LIVE = ()
-NOTE = "cvd_agree_vol_log"
+SKIP_LIVE = ("PDL", "PDH", "PWL", "PWH", "OPEN", "EMA", "ONH", "ONL")
+NOTE = "h4_h1_only"
 
 
 def envload():
@@ -337,6 +338,9 @@ def load_pois():
         if on_walking(tag, t):
             continue
         r = Rail(name, px, kind, t)
+        u = (r.kind + " " + r.name).upper()
+        if not ("H4" in u or r.kind in ("240", "4H") or "H1" in u or r.kind in ("60", "1H")):
+            continue
         if any(tag.startswith(x) or tag == x for x in ("EMA", "ONH", "ONL", "OPEN", "PDH", "PDL", "PWH", "PWL")):
             k = tag
         else:
