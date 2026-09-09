@@ -47,7 +47,7 @@ TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
 ON_FREEZE = 8 * 60 + 30  # 08:30 CT — ONH/ONL freeze; walking before, rails after
 SKIP_LIVE = ()
-NOTE = "skip_dead_visit_rth"
+NOTE = "all_rails_in_watch"
 
 
 def envload():
@@ -350,34 +350,28 @@ def is_h4(r: Rail) -> bool:
     return "H4" in u or r.kind == "240"
 
 
-def nearest_pack(mid: float, rails: list[Rail], lo: float, hi: float, skip_keys=()) -> Pack | None:
-    fade_c = [r for r in rails if abs(hi - r.px) <= WATCH or (lo <= r.px <= hi and r.px >= mid)]
-    bounce_c = [r for r in rails if abs(lo - r.px) <= WATCH or (lo <= r.px <= hi and r.px <= mid)]
-    if fade_c and bounce_c:
-        use_fade = (hi - mid) >= (mid - lo)
-        pool = fade_c if use_fade else bounce_c
-    elif fade_c:
-        use_fade = True
-        pool = fade_c
-    elif bounce_c:
-        use_fade = False
-        pool = bounce_c
-    else:
-        pool = [r for r in rails if extreme_dist(r.px, lo, hi) <= WATCH]
-        use_fade = (hi - mid) >= (mid - lo)
-    if skip_keys:
-        pool = [r for r in pool if vk_px(r.px) not in skip_keys]
-    if not pool:
-        return None
-    anchor = hi if use_fade else lo
-    pool.sort(key=lambda r: (abs(r.px - anchor), 0 if is_h4(r) else 1, -r.ts))
-    seed = pool[0]
-    pack = [r for r in rails if abs(r.px - seed.px) <= CLUSTER]
-    plo = min(r.px for r in pack)
-    phi = max(r.px for r in pack)
-    h4 = [r for r in pack if is_h4(r)]
-    chosen = min(h4 or pack, key=lambda r: (abs(r.px - anchor), -r.ts))
-    return Pack(chosen, plo, phi)
+def packs_in_watch(rails: list[Rail], lo: float, hi: float, skip_keys=()) -> list[Pack]:
+    """Every merged cluster the 1m bar tags. Dead/spent omitted. No single 'nearest'."""
+    skip_keys = set(skip_keys)
+    tagged = [r for r in rails if extreme_dist(r.px, lo, hi) <= WATCH]
+    if not tagged:
+        return []
+    seen: set[str] = set()
+    packs: list[Pack] = []
+    for seed in tagged:
+        group = [r for r in rails if abs(r.px - seed.px) <= CLUSTER]
+        plo = min(r.px for r in group)
+        phi = max(r.px for r in group)
+        h4 = [r for r in group if is_h4(r)]
+        chosen = min(h4 or group, key=lambda r: (extreme_dist(r.px, lo, hi), -r.ts))
+        pk = Pack(chosen, plo, phi)
+        vk = visit_key(pk)
+        if vk in skip_keys or vk in seen:
+            continue
+        seen.add(vk)
+        packs.append(pk)
+    packs.sort(key=lambda p: extreme_dist(p.chosen.px, lo, hi))
+    return packs
 
 
 @dataclass
@@ -545,7 +539,7 @@ def main():
         bar_lo, bar_hi = candle_hl(closed, forming, mid=mid)
         in_pos = locked()
         skip = {k for k, mm in machines.items() if mm.spent_fill or mm.visit_dead} if not in_pos else set()
-        pack = nearest_pack(mid, rails, bar_lo, bar_hi, skip)
+        packs = packs_in_watch(rails, bar_lo, bar_hi, skip)
 
         new_1m = closed is not None and closed.t0 != last_1m_t0
         if new_1m:
@@ -555,164 +549,166 @@ def main():
             try:
                 far = extreme_dist(float(k), bar_lo, bar_hi) > WATCH
             except Exception:
-                far = pack is None
+                far = not packs
             if far:
                 if mm.visit_dead or mm.phase != "IDLE" or mm.spent_fill:
                     mm.clear_visit()
                     if n % 20 == 0:
                         emit(event="score", mid=round(mid, 3), poi=k, reason="left_watch_reset")
 
-        if pack is None:
+        if not packs:
             if n % 40 == 0:
                 emit(event="score", mid=round(mid, 3), reason="no_rail_in_watch",
                      vol=vmet, vol_src=vol_src, bar=[bar_lo, bar_hi])
             continue
 
-        vk = visit_key(pack)
-        m = machines.get(vk)
-        if m is None:
-            m = Machine(vk)
-            machines[vk] = m
-        if m.arrived is None and m.last_mid is not None:
-            if m.last_mid > pack.chosen.px and mid <= pack.chosen.px:
-                m.arrived = "down"
-            elif m.last_mid < pack.chosen.px and mid >= pack.chosen.px:
-                m.arrived = "up"
-        m.last_mid = mid
+        for pack in packs:
+            vk = visit_key(pack)
+            m = machines.get(vk)
+            if m is None:
+                m = Machine(vk)
+                machines[vk] = m
+            if m.arrived is None and m.last_mid is not None:
+                if m.last_mid > pack.chosen.px and mid <= pack.chosen.px:
+                    m.arrived = "down"
+                elif m.last_mid < pack.chosen.px and mid >= pack.chosen.px:
+                    m.arrived = "up"
+            m.last_mid = mid
 
-        bounce = (m.arrived or "down") == "down"
-        if m.arrived is None:
-            bounce = bar_lo <= pack.chosen.px
+            bounce = (m.arrived or "down") == "down"
+            if m.arrived is None:
+                bounce = bar_lo <= pack.chosen.px
 
-        if m.spent_fill:
-            rec_l = dict(event="score", mid=round(mid, 3), poi=pack.key, reason="same_sweep_spent")
+            if m.spent_fill:
+                if n % 20 == 0:
+                    emit(event="score", mid=round(mid, 3), poi=pack.key, reason="same_sweep_spent")
+                continue
+
+            rec = dict(event="score", mid=round(mid, 3), poi=pack.key, vk=vk, px=pack.chosen.px,
+                       zone=[pack.zone_lo, pack.zone_hi], vol=vmet, vol_src=vol_src,
+                       phase=m.phase, submit=False, arrived=m.arrived, visit_dead=m.visit_dead,
+                       bar=[round(bar_lo, 3), round(bar_hi, 3)], tag="low" if bounce else "high",
+                       n_rails=len(packs))
+
+            if m.visit_dead:
+                continue
+
+            if m.phase == "IDLE":
+                if not new_1m:
+                    rec["reason"] = "idle_wait_1m"
+                    if n % 15 == 0:
+                        emit(**rec)
+                    continue
+                if closed is None or not pack.hit(closed.l, closed.h, bounce):
+                    rec["reason"] = "idle_no_hit"
+                    if closed:
+                        rec["c1"] = dict(h=closed.h, l=closed.l, c=closed.c)
+                    if n % 15 == 0:
+                        emit(**rec)
+                    continue
+                if not vol_ok:
+                    rec["reason"] = "idle_vol_expanding"
+                    emit(**rec)
+                    continue
+                if is_brt_reclaim(pack, closed):
+                    m.visit_dead = True
+                    rec["reason"] = "brt_reclaim"
+                    rec["snap"] = m.out("brt_reclaim")
+                    emit(**rec)
+                    continue
+                if bounce and closed.c < pack.chosen.px:
+                    rec["reason"] = "idle_long_under_rail"
+                    rec["c1"] = dict(h=closed.h, l=closed.l, c=closed.c)
+                    emit(**rec)
+                    continue
+                if (not bounce) and closed.c > pack.chosen.px:
+                    rec["reason"] = "idle_short_over_rail"
+                    rec["c1"] = dict(h=closed.h, l=closed.l, c=closed.c)
+                    emit(**rec)
+                    continue
+                m.bounce = bounce
+                m.picture = "bounce_long" if bounce else "fade_short"
+                m.side = "Buy" if bounce else "Sell"
+                m.c1 = closed
+                m.phase = "WAIT_C2"
+                rec.update(reason="armed_c1", snap=m.out("armed_c1"),
+                           c1=dict(t0=closed.t0, h=closed.h, l=closed.l, c=closed.c))
+                emit(**rec)
+                continue
+
+            if m.phase == "WAIT_C2":
+                if not new_1m or m.c1 is None or closed is None or closed.t0 == m.c1.t0:
+                    rec["reason"] = "wait_c2"
+                    if n % 10 == 0:
+                        emit(**rec)
+                    continue
+                c1, c2 = m.c1, closed
+                bounce = m.bounce
+                hold = (c2.c >= pack.chosen.px) if bounce else (c2.c <= pack.chosen.px)
+                hl = c2.l > c1.l if bounce else c2.h < c1.h
+                recut = (c2.l <= c1.l) if bounce else (c2.h >= c1.h)
+                through = pack.close_through(c2.c, bounce)
+                lean = tape_lean(o, bounce)
+                stop_px, stop_pts, tp_pts = rail_stop_tp(bounce, pack, mid)
+                rec.update(
+                    c1=dict(h=c1.h, l=c1.l, c=c1.c),
+                    c2=dict(h=c2.h, l=c2.l, c=c2.c),
+                    hold=hold, hl_lh=hl, recut=recut, through=through, tape_lean=lean,
+                    stop_pts=stop_pts, stop_px=stop_px, tp_pts=tp_pts, vol_ok=vol_ok,
+                )
+                why = None
+                if is_brt_reclaim(pack, c2):
+                    why = "brt_reclaim"
+                elif through:
+                    why = "c2_close_through"
+                elif not vol_ok:
+                    why = "vol_expanding"
+                elif recut:
+                    why = "c2_recut"
+                elif not hl:
+                    why = "no_hl_lh"
+                elif not hold:
+                    why = "close_gave_shelf"
+                elif not lean:
+                    why = "tape_against"
+                if why:
+                    m.reset_attempt()
+                    m.visit_dead = True
+                    rec.update(reason=why, snap=m.out(why))
+                    emit(**rec)
+                    continue
+
+                ok, sess = session()
+                rec["event"] = "paper_fire"
+                rec["book"] = book_now(stop_pts, tp_pts)
+                rec["snap"] = m.out("fire", True)
+                if not FIRE:
+                    rec["skip"] = "fire_off"
+                elif not ok:
+                    rec["skip"] = sess
+                elif in_pos:
+                    rec["skip"] = "open_position"
+                else:
+                    rc, out = send_book(m.side, pack.key, pack.chosen.px, mid, stop_px, stop_pts, tp_pts)
+                    rec["submit"] = rc == 0
+                    rec["event"] = "struct40_submit" if rc == 0 else "struct40_fail"
+                    rec["rc"] = rc
+                    rec["out"] = out
+                    if rc == 0:
+                        m.spent_fill = True
+                        m.phase = "FILLED"
+                        in_pos = True
+                if rec.get("skip"):
+                    m.reset_attempt()
+                    m.visit_dead = True
+                emit(**rec)
+                if rec.get("submit"):
+                    break
+                continue
+
+            rec["reason"] = m.phase.lower()
             if n % 20 == 0:
-                emit(**rec_l)
-            continue
-
-        rec = dict(event="score", mid=round(mid, 3), poi=pack.key, vk=vk, px=pack.chosen.px,
-                   zone=[pack.zone_lo, pack.zone_hi], vol=vmet, vol_src=vol_src,
-                   phase=m.phase, submit=False, arrived=m.arrived, visit_dead=m.visit_dead,
-                   bar=[round(bar_lo, 3), round(bar_hi, 3)], tag="low" if bounce else "high")
-
-        if m.visit_dead:
-            rec["reason"] = "visit_spent"
-            if n % 15 == 0:
                 emit(**rec)
-            continue
-
-        if m.phase == "IDLE":
-            if not new_1m:
-                rec["reason"] = "idle_wait_1m"
-                if n % 15 == 0:
-                    emit(**rec)
-                continue
-            if not pack.hit(closed.l, closed.h, bounce):
-                rec["reason"] = "idle_no_hit"
-                rec["c1"] = dict(h=closed.h, l=closed.l, c=closed.c)
-                if n % 15 == 0:
-                    emit(**rec)
-                continue
-            if not vol_ok:
-                rec["reason"] = "idle_vol_expanding"
-                emit(**rec)
-                continue
-            if is_brt_reclaim(pack, closed):
-                m.visit_dead = True
-                rec["reason"] = "brt_reclaim"
-                rec["snap"] = m.out("brt_reclaim")
-                emit(**rec)
-                continue
-            if bounce and closed.c < pack.chosen.px:
-                rec["reason"] = "idle_long_under_rail"
-                rec["c1"] = dict(h=closed.h, l=closed.l, c=closed.c)
-                emit(**rec)
-                continue
-            if (not bounce) and closed.c > pack.chosen.px:
-                rec["reason"] = "idle_short_over_rail"
-                rec["c1"] = dict(h=closed.h, l=closed.l, c=closed.c)
-                emit(**rec)
-                continue
-            m.bounce = bounce
-            m.picture = "bounce_long" if bounce else "fade_short"
-            m.side = "Buy" if bounce else "Sell"
-            m.c1 = closed
-            m.phase = "WAIT_C2"
-            rec.update(reason="armed_c1", snap=m.out("armed_c1"),
-                       c1=dict(t0=closed.t0, h=closed.h, l=closed.l, c=closed.c))
-            emit(**rec)
-            continue
-
-        if m.phase == "WAIT_C2":
-            if not new_1m or m.c1 is None or closed.t0 == m.c1.t0:
-                rec["reason"] = "wait_c2"
-                if n % 10 == 0:
-                    emit(**rec)
-                continue
-            c1, c2 = m.c1, closed
-            bounce = m.bounce
-            hold = (c2.c >= pack.chosen.px) if bounce else (c2.c <= pack.chosen.px)
-            hl = c2.l > c1.l if bounce else c2.h < c1.h
-            recut = (c2.l <= c1.l) if bounce else (c2.h >= c1.h)
-            through = pack.close_through(c2.c, bounce)
-            lean = tape_lean(o, bounce)
-            stop_px, stop_pts, tp_pts = rail_stop_tp(bounce, pack, mid)
-            rec.update(
-                c1=dict(h=c1.h, l=c1.l, c=c1.c),
-                c2=dict(h=c2.h, l=c2.l, c=c2.c),
-                hold=hold, hl_lh=hl, recut=recut, through=through, tape_lean=lean,
-                stop_pts=stop_pts, stop_px=stop_px, tp_pts=tp_pts, vol_ok=vol_ok,
-            )
-            why = None
-            if is_brt_reclaim(pack, c2):
-                why = "brt_reclaim"
-            elif through:
-                why = "c2_close_through"
-            elif not vol_ok:
-                why = "vol_expanding"
-            elif recut:
-                why = "c2_recut"
-            elif not hl:
-                why = "no_hl_lh"
-            elif not hold:
-                why = "close_gave_shelf"
-            elif not lean:
-                why = "tape_against"
-            if why:
-                m.reset_attempt()
-                m.visit_dead = True
-                rec.update(reason=why, snap=m.out(why))
-                emit(**rec)
-                continue
-
-            ok, sess = session()
-            rec["event"] = "paper_fire"
-            rec["book"] = book_now(stop_pts, tp_pts)
-            rec["snap"] = m.out("fire", True)
-            if not FIRE:
-                rec["skip"] = "fire_off"
-            elif not ok:
-                rec["skip"] = sess
-            elif in_pos:
-                rec["skip"] = "open_position"
-            else:
-                rc, out = send_book(m.side, pack.key, pack.chosen.px, mid, stop_px, stop_pts, tp_pts)
-                rec["submit"] = rc == 0
-                rec["event"] = "struct40_submit" if rc == 0 else "struct40_fail"
-                rec["rc"] = rc
-                rec["out"] = out
-                if rc == 0:
-                    m.spent_fill = True
-                    m.phase = "FILLED"
-            if rec.get("skip"):
-                m.reset_attempt()
-                m.visit_dead = True
-            emit(**rec)
-            continue
-
-        rec["reason"] = m.phase.lower()
-        if n % 20 == 0:
-            emit(**rec)
 
 
 if __name__ == "__main__":
