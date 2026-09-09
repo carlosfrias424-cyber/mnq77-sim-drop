@@ -47,7 +47,7 @@ TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
 ON_FREEZE = 8 * 60 + 30  # 08:30 CT — ONH/ONL freeze; walking before, rails after
 SKIP_LIVE = ()
-NOTE = "london2_side_onfreeze"
+NOTE = "side_onfreeze_rth"
 
 
 def envload():
