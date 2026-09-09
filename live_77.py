@@ -45,7 +45,7 @@ SESSION_START = 2 * 60
 SESSION_END = 16 * 60
 TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
-SKIP_LIVE = ("ONH",)
+SKIP_LIVE = ("ONH", "ONL")
 NOTE = "london2_railstop_hl"
 
 
