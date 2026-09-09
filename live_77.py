@@ -498,7 +498,7 @@ def main():
         dbvol = None
         emit(event="vol_err", err=str(e)[:200])
     emit(event="seven_start", fire=FIRE, book=book_now(), note=NOTE,
-         session_start="02:00", vol_src="databento_trades" if dbvol else "missing")
+         session_start="02:00", fresh_s=FRESH_S, vol_src="databento_trades" if dbvol else "missing")
     bars = MinuteBars()
     machines: dict[str, Machine] = {}
     rails: list[Rail] = []
@@ -529,6 +529,12 @@ def main():
         if time.time() - last_poi > 5:
             rails = load_pois()
             last_poi = time.time()
+            live_vks = {vk_px(r.px) for r in rails}
+            for k in list(machines.keys()):
+                if k not in live_vks:
+                    mm = machines.pop(k)
+                    emit(event="machine_drop", vk=k, reason="rail_not_live",
+                         phase=mm.phase, arrived=mm.arrived, visit_dead=mm.visit_dead)
 
         if dbvol is not None:
             closed = dbvol.last_closed_1()
