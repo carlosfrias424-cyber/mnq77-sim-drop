@@ -45,8 +45,9 @@ SESSION_START = 2 * 60
 SESSION_END = 16 * 60
 TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
-SKIP_LIVE = ("ONH", "ONL")
-NOTE = "london2_railstop_hl"
+ON_FREEZE = 8 * 60 + 30  # 08:30 CT — ONH/ONL freeze; walking before, rails after
+SKIP_LIVE = ()
+NOTE = "london2_railstop_hl_onfreeze"
 
 
 def envload():
@@ -74,6 +75,26 @@ def session():
     if mins >= SESSION_END:
         return False, "after_close"
     return True, "open"
+
+
+def on_walking(tag: str, t: float) -> bool:
+    """ONH/ONL walk until 08:30 CT. After that, only the pre-8:30 print is a rail."""
+    u = (tag or "").upper()
+    if not (u.startswith("ONH") or u.startswith("ONL")):
+        return False
+    now = datetime.now(TZ)
+    mins = now.hour * 60 + now.minute
+    if mins < ON_FREEZE:
+        return True
+    if not t:
+        return False
+    try:
+        dt = datetime.fromtimestamp(float(t), TZ)
+        if dt.date() == now.date() and (dt.hour * 60 + dt.minute) >= ON_FREEZE:
+            return True
+    except Exception:
+        return False
+    return False
 
 
 def last_net():
@@ -303,17 +324,19 @@ def load_pois():
         kind = str(o.get("type") or o.get("tf") or o.get("poi_name") or "H1")
         name = str(o.get("poi_name") or kind)
         tag = (name or kind).upper()
-        if any(tag.startswith(x) or tag == x for x in SKIP_LIVE):
-            continue
-        t = o.get("ts") or o.get("time") or o.get("t") or 0
+        t = o.get("ts") or o.get("time") or o.get("t") or o.get("recv_ts") or 0
         try:
             t = float(t)
             if t > 1e12:
                 t /= 1000.0
         except Exception:
             t = 0.0
+        if any(tag.startswith(x) or tag == x for x in SKIP_LIVE):
+            continue
+        if on_walking(tag, t):
+            continue
         r = Rail(name, px, kind, t)
-        if any(tag.startswith(x) or tag == x for x in ("EMA", "ONL", "OPEN", "PDH", "PDL", "PWH", "PWL")):
+        if any(tag.startswith(x) or tag == x for x in ("EMA", "ONH", "ONL", "OPEN", "PDH", "PDL", "PWH", "PWL")):
             k = tag
         else:
             k = (r.kind, r.px)
