@@ -15,7 +15,7 @@ TP, BE, QTY = 40.0, 20.0, 3
 
 
 def dt_of(o):
-    t = o.get("ts") or o.get("recv_ts")
+    t = o.get("recv_ts") or o.get("ts")
     if isinstance(t, str):
         try:
             return datetime.fromisoformat(t.replace("Z", "+00:00")).astimezone(TZ)
@@ -27,7 +27,7 @@ def dt_of(o):
         return None
     if t > 1e12:
         t /= 1000.0
-    if t < 1e11:
+    if t < 1e9:
         return None
     return datetime.fromtimestamp(t, timezone.utc).astimezone(TZ)
 
