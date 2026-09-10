@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Replay today with CURRENT 7/7: no BRT, no 2-min, watch 10, arm 6,
-C2 HL/LH + hold + tape, stop rail+2, TP 40 or 2R, BE +20. 3 MNQ."""
+C2 HL/LH + hold + tape, stop rail+2, TP 40 or 2R, BE +20. 3 MNQ.
+Re-arms a rail when TV pings it again after price left watch.
+Skips walking ONH/ONL."""
 from __future__ import annotations
 import json
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -12,6 +13,7 @@ TZ = ZoneInfo("America/Chicago")
 ROOT = Path("/home/administrator/.openclaw/workspace/mnq_hybrid/logs")
 WATCH, ARM, FAIL, CLUSTER, AIR = 10.0, 6.0, 6.0, 8.0, 2.0
 TP, BE, QTY = 40.0, 20.0, 3
+SKIP = ("ONH", "ONL")
 
 
 def dt_of(o):
@@ -84,19 +86,15 @@ def load_bars(day):
             b[2] = min(b[2], px)
             b[3] = px
             b[4] = d5
+    return [(t, *bars[t]) for t in sorted(bars)]
+
+
+def load_pings(day):
+    """Every webhook after 2am. Walking ONH/ONL dropped."""
     out = []
-    for t in sorted(bars):
-        o, h, l, c, d = bars[t]
-        out.append((t, o, h, l, c, d))
-    return out
-
-
-def load_rails(day):
-    rails = []
-    seen = set()
     p = ROOT / "tv_poi.jsonl"
     if not p.exists():
-        return rails
+        return out
     for ln in p.open():
         if not ln.strip():
             continue
@@ -114,84 +112,63 @@ def load_rails(day):
         if px <= 0:
             continue
         name = str(o.get("poi_name") or o.get("type") or "H1")
-        k = (name.upper()[:12], px)
-        if k in seen:
+        tag = name.upper()
+        if any(tag.startswith(s) for s in SKIP):
             continue
-        seen.add(k)
-        rails.append((dt, name, px))
-    return rails
+        out.append((dt, name, px))
+    return out
 
 
 def main():
     now = datetime.now(TZ)
     day = now.replace(hour=2, minute=0, second=0, microsecond=0)
     closed = load_bars(day)
-    rails = load_rails(day)
-    print(f"day {day:%Y-%m-%d %H:%M %Z}  1m {len(closed)}  rails {len(rails)}")
-    if rails:
-        print("first rail", rails[0][0].strftime("%H:%M"), rails[0][1], rails[0][2])
-        print("last rail", rails[-1][0].strftime("%H:%M"), rails[-1][1], rails[-1][2])
-    else:
-        p = ROOT / "tv_poi.jsonl"
-        print("DEBUG poi missing. file", p.exists(), "bytes", p.stat().st_size if p.exists() else 0)
-        n_dt = n_day = n_px = n_ok = 0
-        if p.exists():
-            for ln in p.open():
-                if not ln.strip():
-                    continue
-                try:
-                    o = json.loads(ln)
-                except Exception:
-                    continue
-                dt = dt_of(o)
-                if not dt:
-                    n_dt += 1
-                    continue
-                if dt < day:
-                    n_day += 1
-                    continue
-                try:
-                    px = round(float(o.get("price") or 0), 2)
-                except Exception:
-                    n_px += 1
-                    continue
-                if px <= 0:
-                    n_px += 1
-                    continue
-                n_ok += 1
-        print("DEBUG no_dt", n_dt, "before_2am", n_day, "bad_px", n_px, "ok", n_ok)
+    pings = load_pings(day)
+    uniq = {}
+    for dt, name, px in pings:
+        uniq[(name, px)] = dt
+    print(f"day {day:%Y-%m-%d %H:%M %Z}  1m {len(closed)}  pings {len(pings)}  rails {len(uniq)}")
+    if uniq:
+        last = max(uniq.items(), key=lambda kv: kv[1])
+        print("last unique", last[1].strftime("%H:%M"), last[0][0], last[0][1])
+
     book = None
     dead = set()
-    sticky = {}
     left = {}
+    last_ping = {}
     trades = []
-    ri = 0
+    pi = 0
 
     for i in range(1, len(closed)):
         t0, _o, h, l, c, d = closed[i]
         _t1, _o1, h1, l1, c1, d1 = closed[i - 1]
-        while ri < len(rails) and rails[ri][0] <= t0:
-            pdt, name, px = rails[ri]
-            ri += 1
-            if dist(px, l, h) <= WATCH:
-                k = f"{name}@{px:.2f}"
-                if pdt.timestamp() > left.get(k, 0):
-                    sticky[k] = (name, px)
-        for pdt, name, px in rails[:ri]:
-            if dist(px, l, h) <= WATCH:
-                k = f"{name}@{px:.2f}"
-                if pdt.timestamp() > left.get(k, 0):
-                    sticky[k] = (name, px)
-        for k in list(sticky):
-            name, px = sticky[k]
+        ts = t0.timestamp()
+        while pi < len(pings) and pings[pi][0] <= t0:
+            pdt, name, px = pings[pi]
+            pi += 1
+            k = f"{name}@{px:.2f}"
+            last_ping[k] = (pdt.timestamp(), name, px)
+
+        sticky = {}
+        for k, (pts, name, px) in last_ping.items():
             if dist(px, l, h) > WATCH:
-                left[k] = t0.timestamp()
-                sticky.pop(k, None)
+                left[k] = ts
                 dead.discard(vk(px))
+                continue
+            if pts <= left.get(k, 0):
+                continue
+            sticky[k] = (name, px)
+        for k in list(left):
+            if k in sticky:
+                pass
+            else:
+                # still gone
+                pass
 
         if book:
             side, entry, sl, tp = book["side"], book["entry"], book["sl"], book["tp"]
             be_on = book["be"]
+            orig = book["orig_sl"]
             if side == "Buy":
                 mfe, mae = h - entry, entry - l
                 if (not be_on) and h >= entry + BE:
@@ -199,8 +176,7 @@ def main():
                     book["sl"] = entry
                     sl = entry
                     be_on = True
-                hit = None
-                exit_px = None
+                hit = exit_px = None
                 if l <= sl:
                     hit, exit_px = ("BE" if be_on else "SL"), sl
                 elif h >= entry + tp:
@@ -212,8 +188,7 @@ def main():
                     book["sl"] = entry
                     sl = entry
                     be_on = True
-                hit = None
-                exit_px = None
+                hit = exit_px = None
                 if h >= sl:
                     hit, exit_px = ("BE" if be_on else "SL"), sl
                 elif l <= entry - tp:
@@ -221,7 +196,7 @@ def main():
             book["mfe"] = max(book["mfe"], mfe)
             book["mae"] = max(book["mae"], mae)
             if hit:
-                trades.append({**book, "exit": exit_px, "hit": hit, "t1": t0})
+                trades.append({**book, "exit": exit_px, "hit": hit, "t1": t0, "sl": orig})
                 book = None
             continue
 
@@ -259,14 +234,14 @@ def main():
         tp = TP if r <= 20 else qtr(2 * r)
         side = "Buy" if bounce else "Sell"
         book = dict(
-            t=t0, side=side, entry=c, sl=stop, r=r, tp=tp,
+            t=t0, side=side, entry=c, sl=stop, orig_sl=stop, r=r, tp=tp,
             poi=f"{name}@{px}", be=False, mfe=0.0, mae=0.0,
         )
         dead.add(vk(px))
 
     if book:
         t0, _o, h, l, c, d = closed[-1]
-        trades.append({**book, "exit": c, "hit": "OPEN", "t1": t0})
+        trades.append({**book, "exit": c, "hit": "OPEN", "t1": t0, "sl": book["orig_sl"]})
 
     print(f"{'when':<8} {'side':<4} {'entry':>8} {'stop':>8} {'tp':>6} {'hit':<4} {'pts':>7} {'$':>7}  poi")
     net = 0.0
