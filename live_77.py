@@ -2,7 +2,9 @@
 """7/7 fade/bounce ONLY. Dual off. No BRT.
 
 Book: 3 MNQ SIM. Stop = 2 pts beyond rail. TP = 40 if R<=20 else 2R. BE +20.
-Session 02:00–16:00 America/Chicago (London cash) M–F. Holidays skipped.
+Session 02:00–14:00 America/Chicago. After 14:00 is coin-toss — no new fires.
+M–F. Holidays skipped.
+
 
 Location is NEVER mid.
   Watch: fade if 1m HIGH tags a rail; bounce if 1m LOW tags a rail.
@@ -51,12 +53,12 @@ R_SPLIT = 20.0
 QTY = 3
 PACE_AFTER = 180.0
 SESSION_START = 2 * 60
-SESSION_END = 16 * 60
+SESSION_END = 14 * 60
 TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
 ON_FREEZE = 8 * 60 + 30  # 08:30 CT — ONH/ONL freeze; walking before, rails after
 SKIP_LIVE = ()
-NOTE = "body_gave_dead"
+NOTE = "cut_1400"
 
 
 def envload():
