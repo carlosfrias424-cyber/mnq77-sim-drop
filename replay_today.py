@@ -127,7 +127,39 @@ def main():
     day = now.replace(hour=2, minute=0, second=0, microsecond=0)
     closed = load_bars(day)
     rails = load_rails(day)
-    print(f"day {day:%Y-%m-%d}  1m {len(closed)}  rails {len(rails)}")
+    print(f"day {day:%Y-%m-%d %H:%M %Z}  1m {len(closed)}  rails {len(rails)}")
+    if rails:
+        print("first rail", rails[0][0].strftime("%H:%M"), rails[0][1], rails[0][2])
+        print("last rail", rails[-1][0].strftime("%H:%M"), rails[-1][1], rails[-1][2])
+    else:
+        p = ROOT / "tv_poi.jsonl"
+        print("DEBUG poi missing. file", p.exists(), "bytes", p.stat().st_size if p.exists() else 0)
+        n_dt = n_day = n_px = n_ok = 0
+        if p.exists():
+            for ln in p.open():
+                if not ln.strip():
+                    continue
+                try:
+                    o = json.loads(ln)
+                except Exception:
+                    continue
+                dt = dt_of(o)
+                if not dt:
+                    n_dt += 1
+                    continue
+                if dt < day:
+                    n_day += 1
+                    continue
+                try:
+                    px = round(float(o.get("price") or 0), 2)
+                except Exception:
+                    n_px += 1
+                    continue
+                if px <= 0:
+                    n_px += 1
+                    continue
+                n_ok += 1
+        print("DEBUG no_dt", n_dt, "before_2am", n_day, "bad_px", n_px, "ok", n_ok)
     book = None
     dead = set()
     sticky = {}
