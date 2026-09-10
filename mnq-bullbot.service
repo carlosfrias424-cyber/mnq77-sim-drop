@@ -1,0 +1,17 @@
+[Unit]
+Description=Bullbot.ai TV webhook -> Tradovate DEMO
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/administrator/.openclaw/workspace/mnq_hybrid
+Environment=BULLBOT_FIRE=1
+Environment=BULLBOT_HOST=127.0.0.1
+Environment=BULLBOT_PORT=8788
+Environment=TRADOVATE_ENV=demo
+ExecStart=/home/administrator/.openclaw/workspace/mnq_hybrid/.venv/bin/python -u /home/administrator/.openclaw/workspace/mnq_hybrid/apps/bullbot/bullbot_hook.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
