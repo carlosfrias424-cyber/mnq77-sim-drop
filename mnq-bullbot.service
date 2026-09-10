@@ -1,11 +1,12 @@
 [Unit]
-Description=Bullbot.ai TV webhook -> Tradovate DEMO
+Description=Bullbot.ai TV webhook -> Tradovate DEMO 5 MNQ mkt in/out
 After=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=/home/administrator/.openclaw/workspace/mnq_hybrid
 Environment=BULLBOT_FIRE=1
+Environment=BULLBOT_QTY=5
 Environment=BULLBOT_HOST=127.0.0.1
 Environment=BULLBOT_PORT=8788
 Environment=TRADOVATE_ENV=demo
