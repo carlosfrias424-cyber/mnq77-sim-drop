@@ -12,8 +12,10 @@ Trigger: next closed 1m HL / LH, close still on our side, CVD agree.
 Volume is logged, never a veto.
 Lock: only while Tradovate net != 0. Flat → fire other rails.
 Same sweep: no revenge until price leaves 10 pts.
-Rails: only webhooks received in the last FRESH_S seconds. No history book.
-PDL/PDH/OPEN are valid if they are alerting now. Stale JSONL rows cannot arm.
+Rails: pinged since today's 02:00 CT stay in the book. Score only while
+1m high/low is within WATCH (10 pts). Leave 10 pts → drop until a NEW ping.
+No 120s clock. Dual history book stays off.
+PDL/PDH/OPEN are valid if pinged today. Yesterday's JSONL rows cannot arm.
 """
 from __future__ import annotations
 
@@ -49,9 +51,8 @@ SESSION_END = 16 * 60
 TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
 ON_FREEZE = 8 * 60 + 30  # 08:30 CT — ONH/ONL freeze; walking before, rails after
-FRESH_S = 120.0          # only score a rail if TV alerted it in the last 2 minutes
 SKIP_LIVE = ()
-NOTE = "fresh_alert_only"
+NOTE = "visit_sticky_watch"
 
 
 def envload():
@@ -79,6 +80,14 @@ def session():
     if mins >= SESSION_END:
         return False, "after_close"
     return True, "open"
+
+
+def session_open_ts() -> float:
+    """02:00 CT today. Rails pinged before this are yesterday — ignore."""
+    dt = datetime.now(TZ)
+    start = dt.replace(hour=SESSION_START // 60, minute=SESSION_START % 60,
+                       second=0, microsecond=0)
+    return start.timestamp()
 
 
 def on_walking(tag: str, t: float) -> bool:
@@ -343,7 +352,7 @@ def load_pois():
                 t /= 1000.0
         except Exception:
             t = 0.0
-        if recv <= 0 or (now - recv) > FRESH_S:
+        if recv <= 0 or recv < session_open_ts():
             continue
         if on_walking(tag, t):
             continue
@@ -498,10 +507,13 @@ def main():
         dbvol = None
         emit(event="vol_err", err=str(e)[:200])
     emit(event="seven_start", fire=FIRE, book=book_now(), note=NOTE,
-         session_start="02:00", fresh_s=FRESH_S, vol_src="databento_trades" if dbvol else "missing")
+         session_start="02:00", fresh_s=None, vol_src="databento_trades" if dbvol else "missing")
     bars = MinuteBars()
     machines: dict[str, Machine] = {}
     rails: list[Rail] = []
+    today_rails: list[Rail] = []
+    sticky: dict[str, Rail] = {}
+    left_ts: dict[str, float] = {}
     last_poi = 0.0
     last_1m_t0 = None
     n = 0
@@ -527,14 +539,8 @@ def main():
         now = ts
         n += 1
         if time.time() - last_poi > 5:
-            rails = load_pois()
+            today_rails = load_pois()
             last_poi = time.time()
-            live_vks = {vk_px(r.px) for r in rails}
-            for k in list(machines.keys()):
-                if k not in live_vks:
-                    mm = machines.pop(k)
-                    emit(event="machine_drop", vk=k, reason="rail_not_live",
-                         phase=mm.phase, arrived=mm.arrived, visit_dead=mm.visit_dead)
 
         if dbvol is not None:
             closed = dbvol.last_closed_1()
@@ -556,6 +562,31 @@ def main():
             vol_src = "missing"
 
         bar_lo, bar_hi = candle_hl(closed, forming, mid=mid)
+
+        # Keep a pinged rail while 1m still tags it. Leave 10 pts → dead
+        # until TV pings again (recv after we left).
+        for r in today_rails:
+            if extreme_dist(r.px, bar_lo, bar_hi) <= WATCH:
+                recv = float(getattr(r, "_recv", 0) or 0)
+                if recv > left_ts.get(r.key, 0.0):
+                    sticky[r.key] = r
+        for k in list(sticky):
+            r = sticky[k]
+            if extreme_dist(r.px, bar_lo, bar_hi) > WATCH:
+                left_ts[k] = now
+                sticky.pop(k, None)
+        rails = list(sticky.values())
+        live_vks = {vk_px(r.px) for r in rails}
+        for k in list(machines.keys()):
+            try:
+                far = extreme_dist(float(k), bar_lo, bar_hi) > WATCH
+            except Exception:
+                far = k not in live_vks
+            if far:
+                mm = machines.pop(k)
+                emit(event="machine_drop", vk=k, reason="left_watch",
+                     phase=mm.phase, arrived=mm.arrived, visit_dead=mm.visit_dead)
+
         in_pos = locked()
         skip = {k for k, mm in machines.items() if mm.spent_fill or mm.visit_dead} if not in_pos else set()
         packs = packs_in_watch(rails, bar_lo, bar_hi, skip)
