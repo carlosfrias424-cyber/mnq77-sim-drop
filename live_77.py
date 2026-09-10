@@ -7,11 +7,14 @@ Session 02:00–16:00 America/Chicago (London cash) M–F. Holidays skipped.
 Location is NEVER mid.
   Watch: fade if 1m HIGH tags a rail; bounce if 1m LOW tags a rail.
   Spike high → pick the rail at the HIGH (not nearest mid).
-Arm: closed 1m high (fade) / low (bounce) tags 6-pt shelf.
-Trigger: next closed 1m HL / LH, close still on our side, CVD agree.
+Arm: closed 1m high (fade) / low (bounce) tags 10-pt shelf.
+Trigger: next closed 1m BODY holds the rail (close on our side) and
+  C2 close is not worse than C1 close. Tape WITH on C2 only.
+  Wick recut does NOT kill. C1 tape-against does NOT kill.
 Volume is logged, never a veto.
 Lock: only while Tradovate net != 0. Flat → fire other rails.
-Same sweep: no revenge until price leaves 10 pts.
+Same sweep: no revenge after a FILL until price leaves 10 pts.
+Failed C2 → try again next 1m. Close-through → visit dead.
 Rails: pinged since today's 02:00 CT stay in the book. Score only while
 1m high/low is within WATCH (10 pts). Leave 10 pts → drop until a NEW ping.
 No 120s clock. Dual history book stays off. No BRT skip.
@@ -37,7 +40,7 @@ FIRE = True
 
 TICK = 0.25
 WATCH = 10.0
-ARM_PTS = 6.0
+ARM_PTS = 10.0
 FAIL_PTS = 6.0
 CLUSTER = 8.0
 AIR = 2.0
@@ -662,10 +665,7 @@ def main():
                     rec["c1"] = dict(h=closed.h, l=closed.l, c=closed.c)
                     emit(**rec)
                     continue
-                if not lean0:
-                    rec["reason"] = "idle_tape_against"
-                    emit(**rec)
-                    continue
+                # C1 tape is the dump. Do not veto. Tape is C2.
                 m.bounce = bounce
                 m.picture = "bounce_long" if bounce else "fade_short"
                 m.side = "Buy" if bounce else "Sell"
@@ -685,8 +685,8 @@ def main():
                 c1, c2 = m.c1, closed
                 bounce = m.bounce
                 hold = (c2.c >= pack.chosen.px) if bounce else (c2.c <= pack.chosen.px)
-                hl = c2.l > c1.l if bounce else c2.h < c1.h
-                recut = (c2.l <= c1.l) if bounce else (c2.h >= c1.h)
+                hl = c2.c >= c1.c if bounce else c2.c <= c1.c
+                recut = False
                 through = pack.close_through(c2.c, bounce)
                 lean = tape_lean(o, bounce)
                 stop_px, stop_pts, tp_pts = rail_stop_tp(bounce, pack, mid)
@@ -699,17 +699,16 @@ def main():
                 why = None
                 if through:
                     why = "c2_close_through"
-                elif recut:
-                    why = "c2_recut"
-                elif not hl:
-                    why = "no_hl_lh"
                 elif not hold:
                     why = "close_gave_shelf"
+                elif not hl:
+                    why = "no_hl_lh"
                 elif not lean:
                     why = "tape_against"
                 if why:
                     m.reset_attempt()
-                    m.visit_dead = True
+                    if through:
+                        m.visit_dead = True
                     rec.update(reason=why, snap=m.out(why))
                     emit(**rec)
                     continue
