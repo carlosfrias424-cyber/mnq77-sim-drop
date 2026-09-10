@@ -135,7 +135,7 @@ def main() -> int:
         account_id = pick.get("id")
     account_id = int(account_id)
     spec = os.environ.get("TRADOVATE_ACCOUNT_SPEC") or name
-    symbol = os.environ.get("TRADOVATE_SYMBOL", "MNQU6")
+    symbol = os.environ.get("TRADOVATE_SYMBOL", "MNQZ6")
 
     if os.environ.get("MNQ_ALLOW_ADD") != "1":
         pos_raw = requests.get(base + "/position/list", headers=h, timeout=20).json()
