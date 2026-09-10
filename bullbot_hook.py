@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Bullbot.ai webhook. SEPARATE from 7/7 rails.
 
-POST /tv/signal  (also / and /tv/signal/)
-  LONG/SHORT entry -> Tradovate DEMO 3 MNQ, stop 20, TP 40
+POST /tv/signal
+  LONG/SHORT entry -> Tradovate DEMO 5 MNQ MARKET (no stop, no TP)
   LONG/SHORT exit  -> flatten DEMO
   OK confirm       -> log only
 
-Never writes tv_poi.jsonl. Never calls live_77.
+Bullbot owns the trade. 7/7 does not fire.
 Demo URL only.
 """
 from __future__ import annotations
@@ -22,10 +22,11 @@ from urllib.parse import urlparse
 ROOT = Path("/home/administrator/.openclaw/workspace/mnq_hybrid")
 LOG = ROOT / "logs/bullbot.jsonl"
 PY = ROOT / ".venv/bin/python"
-SUBMIT = ROOT / "apps/tradovate/place_struct40.py"
+SUBMIT = ROOT / "apps/tradovate/place_mkt.py"
 FLAT = ROOT / "apps/tradovate/flatten_mkt.py"
 HOST = os.environ.get("BULLBOT_HOST", "127.0.0.1")
 PORT = int(os.environ.get("BULLBOT_PORT", "8788"))
+QTY = os.environ.get("BULLBOT_QTY", "5")
 FIRE = os.environ.get("BULLBOT_FIRE", "1").strip() not in ("0", "false", "False", "")
 
 
@@ -51,7 +52,6 @@ def emit(**kw) -> dict:
 
 
 def classify(raw: str, obj) -> str:
-    """Return Buy, Sell, flat, ok, or ignore."""
     parts = [raw]
     if isinstance(obj, dict):
         for k in ("action", "side", "event", "type", "msg", "message", "comment", "alert"):
@@ -73,7 +73,6 @@ def classify(raw: str, obj) -> str:
         return "Buy"
     if "short entry" in blob or "sell" in blob or "entry short" in blob:
         return "Sell"
-    # bare words last
     if " long" in blob or blob.strip() == "long":
         return "Buy"
     if " short" in blob or blob.strip() == "short":
@@ -99,10 +98,17 @@ def run_py(script: Path, extra_env: dict) -> tuple[int, str]:
 
 def handle_signal(raw: str, obj) -> dict:
     kind = classify(raw, obj)
-    rec = emit(event="signal", kind=kind, fire=FIRE, raw=raw[:500], parsed=obj if isinstance(obj, dict) else None)
+    rec = emit(
+        event="signal",
+        kind=kind,
+        fire=FIRE,
+        qty=int(QTY),
+        book="mkt_in_mkt_out",
+        raw=raw[:500],
+        parsed=obj if isinstance(obj, dict) else None,
+    )
     if kind == "ignore":
         rec["skip"] = "unparsed"
-        emit(**{k: rec[k] for k in rec if k != "ts"}, event="skip")
         return rec
     if kind == "ok":
         rec["skip"] = "ok_confirm_log_only"
@@ -118,20 +124,15 @@ def handle_signal(raw: str, obj) -> dict:
         rec["rc"] = rc
         return rec
 
-    # reverse: flatten first so we never add to the other side
-    run_py(FLAT, {})
     rc, out = run_py(
         SUBMIT,
         {
             "MNQ_SIDE": kind,
-            "MNQ_QTY": "3",
+            "MNQ_QTY": str(QTY),
             "TRADOVATE_ENV": "demo",
-            "MNQ_POI_NAME": "BULLBOT",
-            "MNQ_STOP_PTS": "20",
-            "MNQ_T40": "40",
         },
     )
-    emit(event="entry", side=kind, rc=rc, out=out)
+    emit(event="entry", side=kind, qty=int(QTY), rc=rc, out=out)
     rec["submit"] = "entry"
     rec["side"] = kind
     rec["rc"] = rc
@@ -153,9 +154,9 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path.rstrip("/") or "/"
         if path in ("/health", "/tv/signal/health"):
-            self._send(200, {"ok": True, "fire": FIRE, "service": "bullbot"})
+            self._send(200, {"ok": True, "fire": FIRE, "qty": int(QTY), "book": "mkt_in_mkt_out", "service": "bullbot"})
             return
-        self._send(200, {"ok": True, "post": "/tv/signal", "fire": FIRE})
+        self._send(200, {"ok": True, "post": "/tv/signal", "fire": FIRE, "qty": int(QTY), "book": "mkt_in_mkt_out"})
 
     def do_POST(self):
         path = urlparse(self.path).path.rstrip("/") or "/"
@@ -179,9 +180,9 @@ def main() -> None:
     envload()
     if os.environ.get("TRADOVATE_ENV", "demo").lower() != "demo":
         raise SystemExit("bullbot: not demo")
-    emit(event="bullbot_start", fire=FIRE, host=HOST, port=PORT)
+    emit(event="bullbot_start", fire=FIRE, qty=int(QTY), book="mkt_in_mkt_out", host=HOST, port=PORT)
     httpd = ThreadingHTTPServer((HOST, PORT), H)
-    print(f"bullbot on {HOST}:{PORT} fire={FIRE}", flush=True)
+    print(f"bullbot on {HOST}:{PORT} fire={FIRE} qty={QTY} mkt_in_mkt_out", flush=True)
     httpd.serve_forever()
 
 
