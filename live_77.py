@@ -14,7 +14,7 @@ Lock: only while Tradovate net != 0. Flat → fire other rails.
 Same sweep: no revenge until price leaves 10 pts.
 Rails: pinged since today's 02:00 CT stay in the book. Score only while
 1m high/low is within WATCH (10 pts). Leave 10 pts → drop until a NEW ping.
-No 120s clock. Dual history book stays off.
+No 120s clock. Dual history book stays off. No BRT skip.
 PDL/PDH/OPEN are valid if pinged today. Yesterday's JSONL rows cannot arm.
 """
 from __future__ import annotations
@@ -52,7 +52,7 @@ TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
 ON_FREEZE = 8 * 60 + 30  # 08:30 CT — ONH/ONL freeze; walking before, rails after
 SKIP_LIVE = ()
-NOTE = "visit_sticky_watch"
+NOTE = "no_brt_skip"
 
 
 def envload():
@@ -437,14 +437,6 @@ def tape_lean(row: dict, bounce: bool) -> bool:
     return d5 < 0 or bool(row.get("d_short") or row.get("delta_lean_short"))
 
 
-def is_brt_reclaim(pack: Pack, c: Candle) -> bool:
-    poked_dn = c.l < pack.zone_lo - FAIL_PTS
-    poked_up = c.h > pack.zone_hi + FAIL_PTS
-    back_up = c.c >= pack.zone_lo
-    back_dn = c.c <= pack.zone_hi
-    return (poked_dn and back_up) or (poked_up and back_dn)
-
-
 def send_book(side: str, name: str, px: float, mid: float, stop_px: float, stop_pts: float, tp_pts: float):
     env = os.environ.copy()
     env.update({
@@ -660,12 +652,6 @@ def main():
                 lean0 = tape_lean(o, bounce)
                 rec["tape_lean"] = lean0
                 rec["vol_ok"] = vol_ok
-                if is_brt_reclaim(pack, closed):
-                    m.visit_dead = True
-                    rec["reason"] = "brt_reclaim"
-                    rec["snap"] = m.out("brt_reclaim")
-                    emit(**rec)
-                    continue
                 if bounce and closed.c < pack.chosen.px:
                     rec["reason"] = "idle_long_under_rail"
                     rec["c1"] = dict(h=closed.h, l=closed.l, c=closed.c)
@@ -711,9 +697,7 @@ def main():
                     stop_pts=stop_pts, stop_px=stop_px, tp_pts=tp_pts, vol_ok=vol_ok,
                 )
                 why = None
-                if is_brt_reclaim(pack, c2):
-                    why = "brt_reclaim"
-                elif through:
+                if through:
                     why = "c2_close_through"
                 elif recut:
                     why = "c2_recut"
