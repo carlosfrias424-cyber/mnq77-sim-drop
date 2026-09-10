@@ -1,0 +1,17 @@
+[Unit]
+Description=MNQ 7/7 fade-bounce (SIM)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/administrator/.openclaw/workspace/mnq_hybrid
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/administrator/.openclaw/workspace/mnq_hybrid/.venv/bin/python -u /home/administrator/.openclaw/workspace/mnq_hybrid/apps/watcher7/live_77.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/tmp/live_77.out
+StandardError=append:/tmp/live_77.out
+
+[Install]
+WantedBy=default.target
