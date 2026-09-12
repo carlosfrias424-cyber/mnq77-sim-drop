@@ -4,7 +4,7 @@
 POST /tv/signal
   LONG/SHORT entry -> Tradovate DEMO 5 MNQ MARKET (no stop, no TP)
   LONG/SHORT exit  -> flatten DEMO
-  OK confirm       -> log only
+  OK confirm       -> flatten DEMO (cut / exit). Stay = do nothing.
 
 Bullbot owns the trade. 7/7 does not fire.
 Demo URL only.
@@ -110,17 +110,16 @@ def handle_signal(raw: str, obj) -> dict:
     if kind == "ignore":
         rec["skip"] = "unparsed"
         return rec
-    if kind == "ok":
-        rec["skip"] = "ok_confirm_log_only"
-        return rec
     if not FIRE:
         rec["skip"] = "fire_off"
         return rec
 
-    if kind == "flat":
+    # OK confirm = cut / flatten. Stay = send nothing.
+    if kind in ("ok", "flat"):
         rc, out = run_py(FLAT, {})
-        emit(event="flatten", rc=rc, out=out)
+        emit(event="flatten", src_kind=kind, rc=rc, out=out)
         rec["submit"] = "flatten"
+        rec["note"] = "ok_confirm_exit" if kind == "ok" else "exit"
         rec["rc"] = rc
         return rec
 
