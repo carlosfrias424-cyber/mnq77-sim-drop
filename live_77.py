@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""7/7 fade/bounce. Dual UNPLUGGED. PAPER ONLY.
+"""7/7 bounce support / fade resistance. Dual UNPLUGGED. PAPER ONLY.
 
-Side from LOCATION, not rail name, not wick-tag:
-  price under rail → fade short
-  price over  rail → bounce long
-  break + hold the other side → other trade (automatic)
+Pine name is the side:
+  H4L H1L PDL PWL → bounce long (price must hold OVER)
+  H4H H1H PDH PWH → fade short  (price must hold UNDER)
+  wrong side of that name = BRT → skip
+  OPEN / ONH / ONL / EMA → not rails
 
-L2 filter = Databento 5m delta lean. No HL/LH extra candle.
-Fire on the closed 1m that tagged, if hold + tape.
-
+L2 = Databento 5m delta. Fire on the closed 1m that tagged, if hold + tape.
 Book: 3 MNQ, stop 20, TP 40, BE +20. Session 04:00–16:00 CT M–F.
 FIRE=False: paper_fire only.
 """
@@ -35,8 +34,10 @@ STOP_PTS, TP_PTS, BE_PTS, QTY = 20.0, 40.0, 20.0, 3
 SESSION_START, SESSION_END = 4 * 60, 16 * 60
 TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
-SKIP_TAGS = ("ONH", "ONL", "EMA")
-NOTE = "loc_side_l2_no_hl"
+SKIP_TAGS = ("ONH", "ONL", "EMA", "OPEN")
+SUPPORT = {"H4L", "H1L", "PDL", "PWL", "SUPPORT"}
+RESIST = {"H4H", "H1H", "PDH", "PWH", "RESISTANCE"}
+NOTE = "sr_bounce_fade"
 BOOK = dict(qty=QTY, stop=STOP_PTS, tp=TP_PTS, be=BE_PTS, peel=False, runner=False)
 
 
@@ -142,22 +143,31 @@ def extreme_dist(px: float, lo: float, hi: float) -> float:
     return lo - px
 
 
-def norm_kind(name: str, kind: str) -> str:
-    """H4H/H4L/H4 → H4. H1H/H1L/H1 → H1. Session names stay."""
-    u = (name or kind or "H1").upper()
-    if u.startswith("H4"):
-        return "H4"
-    if u.startswith("H1"):
-        return "H1"
-    return name or kind or "H1"
+def sr_kind(name: str) -> str | None:
+    u = (name or "").upper().strip()
+    if not u:
+        return None
+    if any(u.startswith(x) or u == x for x in SKIP_TAGS):
+        return None
+    if u in SUPPORT or u in RESIST:
+        return u
+    return None
 
 
-def loc_bounce(close_px: float, rail_px: float) -> bool | None:
-    """Under rail = fade (False). Over rail = bounce (True). On rail = None."""
-    if close_px < rail_px:
-        return False
-    if close_px > rail_px:
+def bounce_from_name(kind: str) -> bool | None:
+    u = (kind or "").upper()
+    if u in SUPPORT:
         return True
+    if u in RESIST:
+        return False
+    return None
+
+
+def loc_over(px: float, rail_px: float) -> bool | None:
+    if px > rail_px:
+        return True
+    if px < rail_px:
+        return False
     return None
 
 
@@ -192,11 +202,10 @@ def load_pois() -> list[Rail]:
             continue
         if px <= 0:
             continue
-        raw = str(o.get("poi_name") or o.get("type") or o.get("tf") or "H1")
-        tag = raw.upper()
-        if any(tag.startswith(x) or tag == x for x in SKIP_TAGS):
+        raw = str(o.get("poi_name") or o.get("type") or "")
+        kind = sr_kind(raw)
+        if kind is None:
             continue
-        kind = norm_kind(raw, raw)
         recv = o.get("recv_ts") or o.get("ts") or 0
         t = o.get("ts") or recv or 0
         try:
@@ -371,18 +380,33 @@ def main():
             time.sleep(0.25)
             continue
 
-        bounce = loc_bounce(closed.o, rail.px)
+        bounce = bounce_from_name(rail.kind)
         if bounce is None:
-            bounce = loc_bounce(closed.c, rail.px)
-        if bounce is None:
+            rec["reason"] = "not_sr"
+            emit(**rec)
+            time.sleep(0.25)
+            continue
+
+        loc = loc_over(closed.c, rail.px)
+        if loc is None:
+            loc = loc_over(closed.o, rail.px)
+        rec["sr"] = "support" if bounce else "resistance"
+        rec["loc"] = "over" if loc else ("under" if loc is False else "on")
+        rec["tag"] = "low" if bounce else "high"
+
+        if loc is None:
             rec["reason"] = "at_rail"
             rec["c1"] = dict(h=closed.h, l=closed.l, c=closed.c)
             emit(**rec)
             time.sleep(0.25)
             continue
+        if loc != bounce:
+            m.visit_dead = True
+            rec.update(reason="wrong_side_brt", snap=m.out("wrong_side_brt"), visit_dead=True)
+            emit(**rec)
+            time.sleep(0.25)
+            continue
 
-        rec["tag"] = "low" if bounce else "high"
-        rec["loc"] = "over" if bounce else "under"
         hit = (abs(closed.l - rail.px) <= WATCH) if bounce else (abs(closed.h - rail.px) <= WATCH)
         if not hit:
             rec["reason"] = "idle_no_hit"
