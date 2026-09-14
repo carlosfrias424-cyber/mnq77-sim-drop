@@ -339,7 +339,14 @@ if barstate.islast
         array.push(visLn, line.new(bar_index, close, bar_index + 1, close, extend=extend.both, color=colH4, width=1))
         array.push(visLb, label.new(bar_index, close, "", xloc.bar_index, yloc.price, color.new(colH4, 70), label.style_label_left, color.white, size.tiny))
     if array.size(visPx) > 0
-        for i = 0 to array.size(visPx) - 1
+        nVis = array.size(visPx)
+        nKind = array.size(visKind)
+        nTf = array.size(visTf)
+        nLn = array.size(visLn)
+        nLb = array.size(visLb)
+        for i = 0 to nVis - 1
+            if i >= nKind or i >= nTf or i >= nLn or i >= nLb
+                break
             px = array.get(visPx, i)
             kind = array.get(visKind, i)
             ln = array.get(visLn, i)
@@ -354,9 +361,6 @@ if barstate.islast
             label.set_text(lb, kind + " " + str.tostring(px, "#.00"))
             label.set_color(lb, color.new(c, 40))
             label.set_textcolor(lb, c)
-
-if barstate.islast and array.size(visPx) > 0
-    for i = 0 to array.size(visPx) - 1
-        px = array.get(visPx, i)
-        if not na(px1) and math.abs(px1 - px) <= watchPts
-            alert(jsonMsg(array.get(visKind, i), px, array.get(visTf, i)), alert.freq_once_per_bar)
+            if not na(px1) and not na(px) and math.abs(px1 - px) <= watchPts
+                tf = array.get(visTf, i)
+                alert(jsonMsg(kind, px, tf), alert.freq_once_per_bar)
