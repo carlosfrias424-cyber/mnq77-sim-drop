@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""7/7 fade/bounce. Dual UNPLUGGED. PAPER ONLY — Bull Bot owns sim fills.
+"""7/7 fade/bounce. Dual UNPLUGGED. PAPER ONLY.
 
-Reads: TV alerts (tv_poi.jsonl) + Databento trades (mnq_vol).
-Does NOT read decision.jsonl. Does NOT import paper_rule.
+Side from LOCATION, not rail name, not wick-tag:
+  price under rail → fade short
+  price over  rail → bounce long
+  break + hold the other side → other trade (automatic)
 
-Watch = Databento 1m HIGH (fade) / LOW (bounce). Never mid.
-Rail  = newest TV ping the wick tags. Not nearest-to-mid. No ONH.
-Tape  = Databento 5m delta (buy minus sell). Not Dual delta_5s.
+L2 filter = Databento 5m delta lean. No HL/LH extra candle.
+Fire on the closed 1m that tagged, if hold + tape.
 
-Book: 3 MNQ SIM, stop 20, TP 40, BE +20. Session 04:00–16:00 CT M–F.
-FIRE=False: log paper_fire only. No place_struct40.
+Book: 3 MNQ, stop 20, TP 40, BE +20. Session 04:00–16:00 CT M–F.
+FIRE=False: paper_fire only.
 """
 from __future__ import annotations
 
@@ -28,14 +29,14 @@ PY = ROOT / ".venv/bin/python"
 SUBMIT = ROOT / "apps/tradovate/place_struct40.py"
 sys.path.insert(0, str(ROOT / "apps" / "watcher7"))
 
-FIRE = False  # paper only; bullbot owns sim
+FIRE = False
 TICK, WATCH = 0.25, 10.0
 STOP_PTS, TP_PTS, BE_PTS, QTY = 20.0, 40.0, 20.0, 3
 SESSION_START, SESSION_END = 4 * 60, 16 * 60
 TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
 SKIP_TAGS = ("ONH", "ONL", "EMA")
-NOTE = "paper_only_bullbot_owns_sim"
+NOTE = "loc_side_l2_no_hl"
 BOOK = dict(qty=QTY, stop=STOP_PTS, tp=TP_PTS, be=BE_PTS, peel=False, runner=False)
 
 
@@ -141,6 +142,25 @@ def extreme_dist(px: float, lo: float, hi: float) -> float:
     return lo - px
 
 
+def norm_kind(name: str, kind: str) -> str:
+    """H4H/H4L/H4 → H4. H1H/H1L/H1 → H1. Session names stay."""
+    u = (name or kind or "H1").upper()
+    if u.startswith("H4"):
+        return "H4"
+    if u.startswith("H1"):
+        return "H1"
+    return name or kind or "H1"
+
+
+def loc_bounce(close_px: float, rail_px: float) -> bool | None:
+    """Under rail = fade (False). Over rail = bounce (True). On rail = None."""
+    if close_px < rail_px:
+        return False
+    if close_px > rail_px:
+        return True
+    return None
+
+
 @dataclass
 class Rail:
     name: str
@@ -155,7 +175,6 @@ class Rail:
 
 
 def load_pois() -> list[Rail]:
-    """Today's TV pings only. ONH/ONL/EMA are not trade rails."""
     if not POI.exists():
         return []
     best = {}
@@ -173,11 +192,11 @@ def load_pois() -> list[Rail]:
             continue
         if px <= 0:
             continue
-        kind = str(o.get("type") or o.get("tf") or o.get("poi_name") or "H1")
-        name = str(o.get("poi_name") or kind)
-        tag = (name or kind).upper()
+        raw = str(o.get("poi_name") or o.get("type") or o.get("tf") or "H1")
+        tag = raw.upper()
         if any(tag.startswith(x) or tag == x for x in SKIP_TAGS):
             continue
+        kind = norm_kind(raw, raw)
         recv = o.get("recv_ts") or o.get("ts") or 0
         t = o.get("ts") or recv or 0
         try:
@@ -194,7 +213,7 @@ def load_pois() -> list[Rail]:
             t = 0.0
         if recv <= 0 or recv < cut:
             continue
-        r = Rail(name, px, kind, t, recv)
+        r = Rail(kind, px, kind, t, recv)
         k = (r.kind, r.px)
         if k not in best or recv >= best[k].recv:
             best[k] = r
@@ -202,17 +221,11 @@ def load_pois() -> list[Rail]:
 
 
 def alert_rail(rails: list[Rail], lo: float, hi: float) -> Rail | None:
-    """Newest TV ping whose wick is within WATCH. Not nearest mid."""
     tagged = [r for r in rails if extreme_dist(r.px, lo, hi) <= WATCH]
     if not tagged:
         return None
     tagged.sort(key=lambda r: -r.recv)
     return tagged[0]
-
-
-def wick_side(rail: Rail, lo: float, hi: float) -> bool:
-    """True = bounce (low tagged). False = fade (high tagged). Never mid."""
-    return abs(lo - rail.px) <= abs(hi - rail.px)
 
 
 @dataclass
@@ -222,7 +235,6 @@ class Machine:
     side: str | None = None
     picture: str = ""
     bounce: bool = True
-    c1 = None
     visit_dead: bool = False
     spent_fill: bool = False
 
@@ -230,7 +242,6 @@ class Machine:
         self.phase = "IDLE"
         self.side = None
         self.picture = ""
-        self.c1 = None
 
     def clear_visit(self):
         self.reset_attempt()
@@ -338,12 +349,6 @@ def main():
             m = Machine(key=rail.key)
         rec.update(poi=rail.key, px=rail.px, phase=m.phase)
 
-        if m.phase == "IDLE":
-            bounce = wick_side(rail, bar_lo, bar_hi)
-        else:
-            bounce = m.bounce
-        rec["tag"] = "low" if bounce else "high"
-
         new_1m = closed is not None and closed.t0 != last_1m_t0
         if new_1m:
             last_1m_t0 = closed.t0
@@ -359,109 +364,81 @@ def main():
             time.sleep(0.25)
             continue
 
-        if new_1m and closed is not None:
-            through = (closed.c < rail.px) if bounce else (closed.c > rail.px)
-            if through and m.phase == "WAIT_C2":
-                m.visit_dead = True
-                m.reset_attempt()
-                rec.update(reason="body_gave_rail",
-                           c1=dict(h=closed.h, l=closed.l, c=closed.c),
-                           visit_dead=True)
+        if not new_1m or closed is None:
+            rec["reason"] = "idle_wait_1m"
+            if n % 20 == 0:
                 emit(**rec)
-                time.sleep(0.25)
-                continue
+            time.sleep(0.25)
+            continue
 
-        if m.phase == "IDLE":
-            if not new_1m or closed is None:
-                rec["reason"] = "idle_wait_1m"
-                if n % 20 == 0:
-                    emit(**rec)
-                time.sleep(0.25)
-                continue
-            hit = (abs(closed.l - rail.px) <= WATCH) if bounce else (abs(closed.h - rail.px) <= WATCH)
-            if not hit:
-                rec["reason"] = "idle_no_hit"
-                rec["c1"] = dict(h=closed.h, l=closed.l, c=closed.c)
-                if n % 20 == 0:
-                    emit(**rec)
-                time.sleep(0.25)
-                continue
-            m.bounce = bounce
-            m.picture = "bounce_long" if bounce else "fade_short"
-            m.side = "Buy" if bounce else "Sell"
-            m.c1 = closed
-            m.phase = "WAIT_C2"
-            rec.update(reason="armed_c1", snap=m.out("armed_c1"),
-                       c1=dict(t0=closed.t0, h=closed.h, l=closed.l, c=closed.c))
+        bounce = loc_bounce(closed.o, rail.px)
+        if bounce is None:
+            bounce = loc_bounce(closed.c, rail.px)
+        if bounce is None:
+            rec["reason"] = "at_rail"
+            rec["c1"] = dict(h=closed.h, l=closed.l, c=closed.c)
             emit(**rec)
             time.sleep(0.25)
             continue
 
-        if m.phase == "WAIT_C2":
-            if not new_1m or m.c1 is None or closed is None or closed.t0 == m.c1.t0:
-                rec["reason"] = "wait_c2"
-                if n % 15 == 0:
-                    emit(**rec)
-                time.sleep(0.25)
-                continue
-            c1, c2 = m.c1, closed
-            bounce = m.bounce
-            hold = (c2.c >= rail.px) if bounce else (c2.c <= rail.px)
-            hl = c2.c >= c1.c if bounce else c2.c <= c1.c
-            lean, tmet = dbvol.tape_5m(bounce)
-            rec.update(
-                c1=dict(h=c1.h, l=c1.l, c=c1.c),
-                c2=dict(h=c2.h, l=c2.l, c=c2.c),
-                hold=hold, hl_lh=hl, tape_lean=lean, tape=tmet,
-                stop_pts=STOP_PTS, tp_pts=TP_PTS,
-            )
-            why = None
-            if (bounce and c2.c < rail.px) or ((not bounce) and c2.c > rail.px):
-                why = "c2_close_through"
-            elif not hold:
-                why = "close_gave_shelf"
-            elif not hl:
-                why = "no_hl_lh"
-            elif not lean:
-                why = "tape_against"
-            if why:
-                m.reset_attempt()
-                if why == "c2_close_through":
-                    m.visit_dead = True
-                rec.update(reason=why, snap=m.out(why))
+        rec["tag"] = "low" if bounce else "high"
+        rec["loc"] = "over" if bounce else "under"
+        hit = (abs(closed.l - rail.px) <= WATCH) if bounce else (abs(closed.h - rail.px) <= WATCH)
+        if not hit:
+            rec["reason"] = "idle_no_hit"
+            rec["c1"] = dict(h=closed.h, l=closed.l, c=closed.c)
+            if n % 20 == 0:
                 emit(**rec)
-                time.sleep(0.25)
-                continue
+            time.sleep(0.25)
+            continue
 
-            ok, sess = session()
-            rec["event"] = "paper_fire"
-            rec["book"] = BOOK
-            rec["snap"] = m.out("fire", True)
-            if not FIRE:
-                rec["skip"] = "fire_off"
-            elif not ok:
-                rec["skip"] = sess
-            elif in_pos:
-                rec["skip"] = "open_position"
-            else:
-                rc, out = send_book(m.side, rail.key, rail.px, last_px)
-                rec["submit"] = rc == 0
-                rec["event"] = "struct40_submit" if rc == 0 else "struct40_fail"
-                rec["rc"] = rc
-                rec["out"] = out
-                if rc == 0:
-                    m.spent_fill = True
-                    m.phase = "FILLED"
-            if rec.get("skip"):
-                m.reset_attempt()
-                m.visit_dead = True
+        hold = (closed.c >= rail.px) if bounce else (closed.c <= rail.px)
+        lean, tmet = dbvol.tape_5m(bounce)
+        rec.update(
+            c1=dict(t0=closed.t0, h=closed.h, l=closed.l, c=closed.c),
+            hold=hold, tape_lean=lean, tape=tmet,
+            stop_pts=STOP_PTS, tp_pts=TP_PTS,
+        )
+        m.bounce = bounce
+        m.picture = "bounce_long" if bounce else "fade_short"
+        m.side = "Buy" if bounce else "Sell"
+
+        if not hold:
+            m.visit_dead = True
+            rec.update(reason="body_gave_rail", snap=m.out("body_gave_rail"), visit_dead=True)
+            emit(**rec)
+            time.sleep(0.25)
+            continue
+        if not lean:
+            rec.update(reason="tape_against", snap=m.out("tape_against"))
             emit(**rec)
             time.sleep(0.25)
             continue
 
-        rec["reason"] = m.phase.lower()
-        if n % 20 == 0:
-            emit(**rec)
+        ok, sess = session()
+        rec["event"] = "paper_fire"
+        rec["book"] = BOOK
+        rec["snap"] = m.out("fire", True)
+        rec["reason"] = "fire"
+        if not FIRE:
+            rec["skip"] = "fire_off"
+        elif not ok:
+            rec["skip"] = sess
+        elif in_pos:
+            rec["skip"] = "open_position"
+        else:
+            rc, out = send_book(m.side, rail.key, rail.px, last_px)
+            rec["submit"] = rc == 0
+            rec["event"] = "struct40_submit" if rc == 0 else "struct40_fail"
+            rec["rc"] = rc
+            rec["out"] = out
+            if rc == 0:
+                m.spent_fill = True
+                m.phase = "FILLED"
+        if rec.get("skip"):
+            m.spent_fill = True
+            m.visit_dead = True
+        emit(**rec)
         time.sleep(0.25)
 
 
