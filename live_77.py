@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""7/7 fade/bounce. Dual UNPLUGGED.
+"""7/7 fade/bounce. Dual UNPLUGGED. PAPER ONLY — Bull Bot owns sim fills.
 
 Reads: TV alerts (tv_poi.jsonl) + Databento trades (mnq_vol).
 Does NOT read decision.jsonl. Does NOT import paper_rule.
@@ -9,6 +9,7 @@ Rail  = newest TV ping the wick tags. Not nearest-to-mid. No ONH.
 Tape  = Databento 5m delta (buy minus sell). Not Dual delta_5s.
 
 Book: 3 MNQ SIM, stop 20, TP 40, BE +20. Session 04:00–16:00 CT M–F.
+FIRE=False: log paper_fire only. No place_struct40.
 """
 from __future__ import annotations
 
@@ -27,14 +28,14 @@ PY = ROOT / ".venv/bin/python"
 SUBMIT = ROOT / "apps/tradovate/place_struct40.py"
 sys.path.insert(0, str(ROOT / "apps" / "watcher7"))
 
-FIRE = True
+FIRE = False  # paper only; bullbot owns sim
 TICK, WATCH = 0.25, 10.0
 STOP_PTS, TP_PTS, BE_PTS, QTY = 20.0, 40.0, 20.0, 3
 SESSION_START, SESSION_END = 4 * 60, 16 * 60
 TZ = ZoneInfo("America/Chicago")
 HOLIDAYS = {date(2026, 9, 7), date(2026, 11, 26), date(2026, 12, 25)}
 SKIP_TAGS = ("ONH", "ONL", "EMA")
-NOTE = "unplug_dual_wick_alert_tape5m"
+NOTE = "paper_only_bullbot_owns_sim"
 BOOK = dict(qty=QTY, stop=STOP_PTS, tp=TP_PTS, be=BE_PTS, peel=False, runner=False)
 
 
