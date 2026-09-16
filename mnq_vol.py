@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Databento Live MNQ trades → 1m/5m OHLC + 5m delta. No Dual. No decision.jsonl."""
+"""Databento Live MNQ trades → 1m/5m OHLC + 5m delta. No Dual. No decision.jsonl.
+
+Pinned to MNQZ6 (Dec) raw — same contract as TV after the roll.
+Override with MNQ_DB_SYMBOL / MNQ_DB_STYPE if needed.
+"""
 from __future__ import annotations
 
 import logging
@@ -16,6 +20,8 @@ log = logging.getLogger("mnq_vol")
 TZ = ZoneInfo("America/Chicago")
 STALE_S = float(os.environ.get("MNQ_VOL_STALE_S", "8"))
 HEARTBEAT_S = int(os.environ.get("TAPE_HEARTBEAT_S", "10"))
+DEFAULT_SYMBOL = os.environ.get("MNQ_DB_SYMBOL") or os.environ.get("DATABENTO_SYMBOL") or "MNQZ6"
+DEFAULT_STYPE = os.environ.get("MNQ_DB_STYPE") or "raw_symbol"
 
 
 def bar_open(ts: float, minutes: int) -> float:
@@ -88,8 +94,12 @@ class Candle:
 
 
 class MnqVol:
-    def __init__(self, key: str, dataset="GLBX.MDP3", symbols=("MNQ.c.0",), stale_s=STALE_S):
-        self.key, self.dataset, self.symbols, self.stale_s = key, dataset, list(symbols), stale_s
+    def __init__(self, key: str, dataset="GLBX.MDP3", symbols=None, stale_s=STALE_S, stype_in=None):
+        self.key = key
+        self.dataset = dataset
+        self.symbols = list(symbols) if symbols else [DEFAULT_SYMBOL]
+        self.stype_in = stype_in or DEFAULT_STYPE
+        self.stale_s = stale_s
         self._lock = threading.Lock()
         self._last_ts = self._last_px = None
         self._prints = 0
@@ -162,7 +172,7 @@ class MnqVol:
             d_last = last.delta if last else None
             d_prev = prev.delta if prev else None
             d_live = live.delta if live else None
-        met = dict(d_last=d_last, d_prev=d_prev, d_live=d_live, src="databento_5m")
+        met = dict(d_last=d_last, d_prev=d_prev, d_live=d_live, src="databento_5m", symbol=self.symbols[0])
         if d_last is None:
             return False, {**met, "why": "need_closed_5m"}
         cur = d_live if d_live is not None else d_last
@@ -212,6 +222,7 @@ class MnqVol:
     def _run(self):
         import databento as db
         from databento import ReconnectPolicy
+        log.info("subscribe %s stype=%s", self.symbols, self.stype_in)
         while not self._stop.is_set():
             try:
                 self.err = None
@@ -225,7 +236,7 @@ class MnqVol:
                     dataset=self.dataset,
                     schema="trades",
                     symbols=self.symbols,
-                    stype_in="continuous",
+                    stype_in=self.stype_in,
                 )
                 client.add_callback(self._on_rec)
                 client.start()
@@ -251,4 +262,4 @@ def start_from_env() -> MnqVol:
     key = os.environ.get("DATABENTO_API_KEY") or os.environ.get("DATABENTO_KEY") or ""
     if not key:
         raise RuntimeError("DATABENTO_API_KEY missing")
-    return MnqVol(key).start()
+    return MnqVol(key, symbols=(DEFAULT_SYMBOL,), stype_in=DEFAULT_STYPE).start()
